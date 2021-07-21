@@ -76,7 +76,7 @@ async function startEc2Instance(label, githubRegistrationToken) {
     try {
       await ec2.associateAddress(params).promise();
     } catch (error) {
-      core.warning(`Elastic IP association error, trying to proceed w/o EIP: ${error.name}`);
+      core.warning(`Elastic IP association error, trying to proceed w/o EIP: ${error.message}`);
     }
   }
 
