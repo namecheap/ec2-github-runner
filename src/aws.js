@@ -3,6 +3,23 @@ const core = require('@actions/core');
 const config = require('./config');
 const { sortByCreationDate } = require('./utils');
 
+async function waitForInstanceRunning(ec2InstanceId) {
+  const ec2 = new AWS.EC2();
+
+  const params = {
+    InstanceIds: [ec2InstanceId],
+  };
+
+  try {
+    await ec2.waitFor('instanceRunning', params).promise();
+    core.info(`AWS EC2 instance ${ec2InstanceId} is up and running`);
+    return;
+  } catch (error) {
+    core.error(`AWS EC2 instance ${ec2InstanceId} initialization error`);
+    throw error;
+  }
+}
+
 async function startEc2Instance(label, githubRegistrationToken) {
   const ec2 = new AWS.EC2();
 
@@ -98,23 +115,6 @@ async function terminateEc2Instance() {
     return;
   } catch (error) {
     core.error(`AWS EC2 instance ${config.input.ec2InstanceId} termination error`);
-    throw error;
-  }
-}
-
-async function waitForInstanceRunning(ec2InstanceId) {
-  const ec2 = new AWS.EC2();
-
-  const params = {
-    InstanceIds: [ec2InstanceId],
-  };
-
-  try {
-    await ec2.waitFor('instanceRunning', params).promise();
-    core.info(`AWS EC2 instance ${ec2InstanceId} is up and running`);
-    return;
-  } catch (error) {
-    core.error(`AWS EC2 instance ${ec2InstanceId} initialization error`);
     throw error;
   }
 }
