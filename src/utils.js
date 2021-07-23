@@ -13,7 +13,7 @@ function sortByCreationDate(data) {
     const dateA = new Date(a['CreationDate']).getTime();
     const dateB = new Date(b['CreationDate']).getTime();
 
-    return dateA - dateB;
+    return dateB - dateA;
   });
 }
 
