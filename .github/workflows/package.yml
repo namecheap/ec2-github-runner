@@ -1,7 +1,7 @@
 on:
   push:
     branches:
-      - '**'
+      - main
 
 name: Package
 
@@ -11,8 +11,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-
+        uses: actions/checkout@v2
+        with:
+          ref: main
       - name: Install packages
         run: npm ci
       - name: Run linter
@@ -24,4 +25,4 @@ jobs:
           git config --global user.name "GitHub Actions"
           git add dist/
           git commit -m "Update dist" || echo "No changes to commit"
-          git push origin HEAD
+          git push origin main
