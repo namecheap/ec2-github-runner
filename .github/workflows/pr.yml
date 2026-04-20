@@ -1,17 +1,15 @@
 name: PR automations
 on:
   pull_request:
-    branches:
-      - main
 jobs:
   lint-code:
     name: Lint code
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
       - name: Cache dependencies
-        uses: actions/cache@v2
+        uses: actions/cache@v4
         with:
           path: '**/node_modules'
           key: ec2-github-runner-${{ hashFiles('**/package-lock.json') }}
@@ -19,3 +17,53 @@ jobs:
         run: npm install
       - name: Run linter
         run: npm run lint
+
+  verify-dist:
+    name: Verify dist is up to date
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install packages
+        run: npm ci
+      - name: Rebuild dist
+        # @vercel/ncc 0.25.1 uses a webpack version that needs the
+        # legacy OpenSSL provider on modern Node for module hashing.
+        run: NODE_OPTIONS=--openssl-legacy-provider npm run package
+      - name: Fail if dist/ differs from committed copy
+        run: |
+          if ! git diff --quiet -- dist/; then
+            echo "::error::dist/index.js is out of sync with src/."
+            echo "::error::Run 'NODE_OPTIONS=--openssl-legacy-provider npm run package' locally and commit the rebuilt dist/."
+            git diff --stat -- dist/
+            exit 1
+          fi
+
+  verify-runner-url:
+    name: Verify pinned actions/runner release exists
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Extract runner version from src/aws.js
+        id: extract
+        run: |
+          version=$(grep -oE 'actions/runner/releases/download/v[0-9]+\.[0-9]+\.[0-9]+' src/aws.js | head -1 | sed 's|.*/v||')
+          if [ -z "$version" ]; then
+            echo "::error::Could not locate the pinned actions/runner version in src/aws.js"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Pinned actions/runner: v$version"
+      - name: HEAD check the Linux x64 release asset
+        env:
+          VERSION: ${{ steps.extract.outputs.version }}
+        run: |
+          url="https://github.com/actions/runner/releases/download/v${VERSION}/actions-runner-linux-x64-${VERSION}.tar.gz"
+          echo "Checking $url"
+          curl -fsSLI -o /dev/null "$url"
