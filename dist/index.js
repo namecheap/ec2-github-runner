@@ -55441,12 +55441,23 @@ module.exports = {
 /***/ 4351:
 /***/ ((__unused_webpack_module, __unused_webpack_exports, __webpack_require__) => {
 
+const fs = __webpack_require__(35747);
+const os = __webpack_require__(12087);
 const aws = __webpack_require__(61150);
 const gh = __webpack_require__(56989);
 const config = __webpack_require__(34570);
 const core = __webpack_require__(42186);
 
+// Write directly to the $GITHUB_OUTPUT file. The bundled @actions/core
+// v1.2.6 still emits the deprecated '::set-output name=X::Y' workflow
+// command; GitHub runners now surface that as a warning. Bypass the
+// legacy path — modern runners always set GITHUB_OUTPUT.
 function setOutput(label, ec2InstanceId) {
+  const outputFile = process.env.GITHUB_OUTPUT;
+  if (outputFile) {
+    fs.appendFileSync(outputFile, `label=${label}${os.EOL}ec2-instance-id=${ec2InstanceId}${os.EOL}`);
+    return;
+  }
   core.setOutput('label', label);
   core.setOutput('ec2-instance-id', ec2InstanceId);
 }
