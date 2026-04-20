@@ -1,3 +1,18 @@
+// Silence DEP0169 (`url.parse()` deprecation) — the bundled aws-sdk v2
+// uses url.parse() internally for endpoint parsing. aws-sdk v2 is in
+// maintenance mode so the warning will not be fixed upstream; we use
+// trusted EC2 endpoint URLs and migrating to aws-sdk v3 would require
+// rewriting the entire action. Intercept at process.emitWarning so we
+// only filter this one code and preserve every other warning, including
+// any user-installed 'warning' listeners and Node's default formatter.
+const originalEmitWarning = process.emitWarning;
+process.emitWarning = function emitWarning(warning, ...rest) {
+  const opts = rest[0];
+  const code = (typeof opts === 'string') ? rest[1] : (opts && opts.code);
+  if (code === 'DEP0169') return;
+  return originalEmitWarning.call(process, warning, ...rest);
+};
+
 const fs = require('fs');
 const os = require('os');
 const aws = require('./aws');
