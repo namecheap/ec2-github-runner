@@ -44,6 +44,22 @@ jobs:
             exit 1
           fi
 
+  unit-tests:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install packages
+        run: npm ci
+      - name: Run jest
+        run: npm test
+
   verify-runner-url:
     name: Verify pinned actions/runner release exists
     runs-on: ubuntu-latest
