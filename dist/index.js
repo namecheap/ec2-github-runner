@@ -87903,42 +87903,32 @@ async function resolveImageId(client) {
 async function startEc2Instance(label, githubRegistrationToken) {
   const client = ec2Client();
 
-  // User-data runs as root. We install dependencies + create a dedicated
-  // 'runner' user, then drop to that user for every subsequent step via
-  // a sudo-heredoc. The runner never needs root and never gets it; the
-  // old RUNNER_ALLOW_RUNASROOT=1 escape hatch is gone.
+  // User-data runs as root. Phase 4's original attempt to drop to a
+  // dedicated 'runner' user via sudo-heredoc broke dogfood in
+  // terraform-provider-namecheap#182 — the EC2 instance came up but the
+  // runner never registered within the 5 min action timeout. Reverted
+  // here to the root-execution path the pre-Phase-4 bootstrap used,
+  // isolating the non-root move for a separate investigation.
   //
-  // Runner version is read from config so consumers can override without
-  // waiting for an action release (see #10 for the motivation chain).
-  //
-  // The tarball is SHA-256 verified against actions/runner's published
-  // checksum before extraction — same defense-in-depth pattern the
-  // provider repo uses for its Go / Terraform downloads.
-  //
-  // --ephemeral tells GitHub to auto-deregister the runner after it
-  // completes a single job; the stop-runner step's explicit removeRunner()
-  // call becomes belt-and-braces rather than the primary deregister path.
+  // Kept from the Phase 4 work (all verified independently of the
+  // root/non-root axis):
+  //   - set -euo pipefail — fail fast on any bootstrap error.
+  //   - --ephemeral + --unattended + --disableupdate on config.sh —
+  //     one-job runner, no interactive prompts, no runner auto-update.
+  //   - SHA-256 verification of the runner tarball against the
+  //     published .sha256 sidecar before extraction.
+  //   - Parameterized runner-version via config.input.runnerVersion.
   const runnerVersion = config.input.runnerVersion;
   const owner = config.githubContext.owner;
   const repo = config.githubContext.repo;
-  const userDataScript = [
+  const userData = [
     '#!/bin/bash',
     'set -euo pipefail',
     '',
-    '# Root-required setup.',
     'mount -o remount,size=1G /tmp',
-    'yum install -y libicu make sudo',
+    'yum install -y libicu make',
     '',
-    '# Create the non-root runner user.',
-    'if ! id runner >/dev/null 2>&1; then',
-    '  useradd -m -s /bin/bash runner',
-    'fi',
-    '',
-    '# Drop to the runner user for download + configure + run.',
-    "sudo -u runner -H bash <<'RUNNER_BOOTSTRAP'",
-    'set -euo pipefail',
-    'cd "$HOME"',
-    'mkdir -p actions-runner && cd actions-runner',
+    'mkdir actions-runner && cd actions-runner',
     '',
     'case "$(uname -m)" in',
     '  aarch64) RUNNER_ARCH="arm64" ;;',
@@ -87956,13 +87946,11 @@ async function startEc2Instance(label, githubRegistrationToken) {
     '',
     'tar xzf "$TARBALL"',
     '',
+    'export RUNNER_ALLOW_RUNASROOT=1',
     'export DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1',
     `./config.sh --url "https://github.com/${owner}/${repo}" --token "${githubRegistrationToken}" --labels "${label}" --ephemeral --unattended --disableupdate`,
     './run.sh',
-    'RUNNER_BOOTSTRAP',
-    '',
   ];
-  const userData = userDataScript;
 
   config.input.ec2ImageId = await resolveImageId(client);
 
