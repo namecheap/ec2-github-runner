@@ -131,6 +131,18 @@ describe('Config — mode validation', () => {
   });
 });
 
+describe('Config — runner-version input', () => {
+  test('defaults to 2.333.1 when input is unset', () => {
+    const config = loadConfig(startModeInputs);
+    expect(config.input.runnerVersion).toBe('2.333.1');
+  });
+
+  test('honors an explicit runner-version override', () => {
+    const config = loadConfig({ ...startModeInputs, 'runner-version': '2.340.0' });
+    expect(config.input.runnerVersion).toBe('2.340.0');
+  });
+});
+
 describe('Config — generateUniqueLabel', () => {
   test('returns a 5-character alphanumeric string', () => {
     const config = loadConfig(startModeInputs);

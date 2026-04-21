@@ -57,21 +57,66 @@ async function resolveImageId(client) {
 async function startEc2Instance(label, githubRegistrationToken) {
   const client = ec2Client();
 
-  // User data scripts are run as the root user.
-  // Docker and git are necessary for GitHub runner and should be pre-installed on the AMI.
-  const userData = [
+  // User-data runs as root. We install dependencies + create a dedicated
+  // 'runner' user, then drop to that user for every subsequent step via
+  // a sudo-heredoc. The runner never needs root and never gets it; the
+  // old RUNNER_ALLOW_RUNASROOT=1 escape hatch is gone.
+  //
+  // Runner version is read from config so consumers can override without
+  // waiting for an action release (see #10 for the motivation chain).
+  //
+  // The tarball is SHA-256 verified against actions/runner's published
+  // checksum before extraction — same defense-in-depth pattern the
+  // provider repo uses for its Go / Terraform downloads.
+  //
+  // --ephemeral tells GitHub to auto-deregister the runner after it
+  // completes a single job; the stop-runner step's explicit removeRunner()
+  // call becomes belt-and-braces rather than the primary deregister path.
+  const runnerVersion = config.input.runnerVersion;
+  const owner = config.githubContext.owner;
+  const repo = config.githubContext.repo;
+  const userDataScript = [
     '#!/bin/bash',
+    'set -euo pipefail',
+    '',
+    '# Root-required setup.',
     'mount -o remount,size=1G /tmp',
-    'yum install -y libicu make',
-    'mkdir actions-runner && cd actions-runner',
-    'case $(uname -m) in aarch64) ARCH="arm64" ;; amd64|x86_64) ARCH="x64" ;; esac && export RUNNER_ARCH=${ARCH}',
-    'curl -O -L https://github.com/actions/runner/releases/download/v2.333.1/actions-runner-linux-${RUNNER_ARCH}-2.333.1.tar.gz',
-    'tar xzf ./actions-runner-linux-${RUNNER_ARCH}-2.333.1.tar.gz',
-    'export RUNNER_ALLOW_RUNASROOT=1',
+    'yum install -y libicu make sudo',
+    '',
+    '# Create the non-root runner user.',
+    'if ! id runner >/dev/null 2>&1; then',
+    '  useradd -m -s /bin/bash runner',
+    'fi',
+    '',
+    '# Drop to the runner user for download + configure + run.',
+    "sudo -u runner -H bash <<'RUNNER_BOOTSTRAP'",
+    'set -euo pipefail',
+    'cd "$HOME"',
+    'mkdir -p actions-runner && cd actions-runner',
+    '',
+    'case "$(uname -m)" in',
+    '  aarch64) RUNNER_ARCH="arm64" ;;',
+    '  amd64|x86_64) RUNNER_ARCH="x64" ;;',
+    '  *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;;',
+    'esac',
+    '',
+    `RUNNER_VERSION="${runnerVersion}"`,
+    'TARBALL="actions-runner-linux-${RUNNER_ARCH}-${RUNNER_VERSION}.tar.gz"',
+    'BASE="https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}"',
+    '',
+    'curl -fsSLo "$TARBALL" "$BASE/$TARBALL"',
+    'expected="$(curl -fsSL "$BASE/$TARBALL.sha256" | awk \'{print $1}\')"',
+    'echo "$expected  $TARBALL" | sha256sum -c -',
+    '',
+    'tar xzf "$TARBALL"',
+    '',
     'export DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1',
-    `./config.sh --url https://github.com/${config.githubContext.owner}/${config.githubContext.repo} --token ${githubRegistrationToken} --labels ${label}`,
+    `./config.sh --url "https://github.com/${owner}/${repo}" --token "${githubRegistrationToken}" --labels "${label}" --ephemeral --unattended --disableupdate`,
     './run.sh',
+    'RUNNER_BOOTSTRAP',
+    '',
   ];
+  const userData = userDataScript;
 
   config.input.ec2ImageId = await resolveImageId(client);
 
