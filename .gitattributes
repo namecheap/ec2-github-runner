@@ -1,0 +1,6 @@
+# ncc-bundled output contains source-embedded CR bytes inside string
+# literals (aws-sdk deps, etc.). Treat the whole dist/ tree as binary
+# so git's autocrlf doesn't strip them on commit, which otherwise
+# produces a permanent mismatch between the committed blob and a
+# fresh `npm run package` rebuild.
+dist/** -text
