@@ -38,9 +38,17 @@ async function waitForInstanceRunning(ec2InstanceId) {
   }
 }
 
-async function resolveImageId(client) {
+async function resolveImage(client) {
+  // Resolves both the image ID and the image's metadata (root-device +
+  // block-device mappings). Callers that only need the ID use the .id
+  // shortcut; the .image field is used by encrypt-ebs to clone the
+  // AMI's BlockDeviceMappings and layer SSE-EBS onto them.
   if (config.input.ec2ImageId) {
-    return config.input.ec2ImageId;
+    const direct = await client.send(new DescribeImagesCommand({ ImageIds: [config.input.ec2ImageId] }));
+    if (!direct.Images || direct.Images.length === 0) {
+      throw new Error(`Unable to describe AMI ${config.input.ec2ImageId}`);
+    }
+    return { id: config.input.ec2ImageId, image: direct.Images[0] };
   }
 
   const amiParams = {
@@ -60,10 +68,34 @@ async function resolveImageId(client) {
     throw new Error('Unable to find AMI using passed filter');
   }
   sortByCreationDate(result);
-  const picked = result.Images[0].ImageId;
-  log.info('describe_images', { match_count: result.Images.length, selected_ami: picked });
+  const picked = result.Images[0];
+  log.info('describe_images', { match_count: result.Images.length, selected_ami: picked.ImageId });
   log.debug('describe_images_all', { images: result.Images.map(i => ({ id: i.ImageId, name: i.Name, created: i.CreationDate })) });
-  return picked;
+  return { id: picked.ImageId, image: picked };
+}
+
+// Build BlockDeviceMappings that encrypt the AMI's root volume without
+// changing its size, type, or iops. Returns null when no root mapping
+// is present on the image (exotic AMIs) — caller should skip encryption
+// and log a warning rather than ship a broken RunInstances call.
+function buildEncryptedRootMapping(image) {
+  const rootDev = image.RootDeviceName;
+  if (!rootDev || !Array.isArray(image.BlockDeviceMappings)) {
+    return null;
+  }
+  const rootMap = image.BlockDeviceMappings.find((b) => b.DeviceName === rootDev);
+  if (!rootMap || !rootMap.Ebs) {
+    return null;
+  }
+  // Clone the EBS config and set Encrypted: true. Drop SnapshotId — AWS
+  // will use the AMI's snapshot automatically and re-encrypt during
+  // launch under the account's default EBS key.
+  const ebsClone = { ...rootMap.Ebs };
+  delete ebsClone.SnapshotId;
+  return [{
+    DeviceName: rootDev,
+    Ebs: { ...ebsClone, Encrypted: true },
+  }];
 }
 
 async function startEc2Instance(label, githubRegistrationToken) {
@@ -153,7 +185,8 @@ async function startEc2Instance(label, githubRegistrationToken) {
     '',
   ];
 
-  config.input.ec2ImageId = await resolveImageId(client);
+  const resolved = await resolveImage(client);
+  config.input.ec2ImageId = resolved.id;
 
   const params = {
     ImageId: config.input.ec2ImageId,
@@ -175,6 +208,20 @@ async function startEc2Instance(label, githubRegistrationToken) {
       HttpEndpoint: 'enabled',
     },
   };
+
+  if (config.input.encryptEbs === 'true') {
+    const mappings = buildEncryptedRootMapping(resolved.image);
+    if (mappings) {
+      params.BlockDeviceMappings = mappings;
+      log.info('encrypt_ebs', { applied: true, root_device: mappings[0].DeviceName });
+    } else {
+      log.warn('encrypt_ebs', {
+        applied: false,
+        reason: 'ami has no root EBS block-device mapping — skipping encryption override',
+        ami_id: resolved.id,
+      });
+    }
+  }
 
   let ec2InstanceId;
   const runStart = Date.now();
@@ -239,4 +286,6 @@ module.exports = {
   startEc2Instance,
   terminateEc2Instance,
   waitForInstanceRunning,
+  // Exported for unit testing.
+  buildEncryptedRootMapping,
 };

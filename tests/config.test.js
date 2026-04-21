@@ -143,6 +143,18 @@ describe('Config — runner-version input', () => {
   });
 });
 
+describe('Config — encrypt-ebs input', () => {
+  test('defaults to "false" when unset', () => {
+    const config = loadConfig(startModeInputs);
+    expect(config.input.encryptEbs).toBe('false');
+  });
+
+  test('honors "true"', () => {
+    const config = loadConfig({ ...startModeInputs, 'encrypt-ebs': 'true' });
+    expect(config.input.encryptEbs).toBe('true');
+  });
+});
+
 describe('Config — http-tokens input', () => {
   test('defaults to "required" when unset', () => {
     const config = loadConfig(startModeInputs);
