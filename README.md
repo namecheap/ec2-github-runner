@@ -64,9 +64,65 @@ EC2 self-hosted runner will handle everything else so that you will pay for it t
 
 Use the following steps to prepare your workflow for running on your EC2 self-hosted runner:
 
-**1. Prepare IAM user with AWS access keys**
+**1. Configure AWS credentials (OIDC preferred)**
 
-1. Create new AWS access keys for the new or an existing IAM user with the following least-privilege minimum required permissions:
+This action reads AWS credentials from the environment. Two paths — pick one.
+
+**Option A (preferred): GitHub OIDC.** No long-lived static keys in your GitHub secrets. A short-lived STS token is minted per workflow run, scoped to the exact repo / branch / environment.
+
+1. Create an OIDC provider for GitHub in your AWS account (one-time per account). The thumbprint is `6938fd4d98bab03faadb97b34396831e3780aea1` as of this writing.
+2. Create an IAM role with a trust relationship to `token.actions.githubusercontent.com`:
+
+   ```hcl
+   # Terraform
+   resource "aws_iam_role" "github_runner" {
+     name = "github-runner"
+     assume_role_policy = jsonencode({
+       Version = "2012-10-17"
+       Statement = [{
+         Effect = "Allow"
+         Principal = { Federated = "arn:aws:iam::<account>:oidc-provider/token.actions.githubusercontent.com" }
+         Action   = "sts:AssumeRoleWithWebIdentity"
+         Condition = {
+           StringEquals = {
+             "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
+           }
+           StringLike = {
+             "token.actions.githubusercontent.com:sub" = "repo:<org>/<repo>:*"
+           }
+         }
+       }]
+     })
+   }
+   ```
+
+3. Attach the least-privilege permissions policy below to that role.
+4. In the workflow, grant OIDC permission to the job and assume the role via `aws-actions/configure-aws-credentials` without any access-key secrets:
+
+   ```yaml
+   permissions:
+     id-token: write   # required for OIDC
+     contents: read
+   steps:
+     - uses: aws-actions/configure-aws-credentials@<sha>
+       with:
+         role-to-assume: arn:aws:iam::<account>:role/github-runner
+         aws-region: <region>
+     - uses: namecheap/ec2-github-runner@<sha>
+       with:
+         mode: start
+         # ...
+   ```
+
+**Option B (legacy): static IAM access keys.** Only use this if OIDC isn't available (e.g., restricted AWS Organization SCPs). The keys rotate manually and live in GitHub secrets indefinitely — a permanent attack surface.
+
+1. Create an IAM user with the same permissions policy below.
+2. Generate an access key pair for the user; store as `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` secrets.
+3. Use `aws-actions/configure-aws-credentials` with those secrets.
+
+**Permissions policy (both paths)**
+
+1. Attach the following least-privilege minimum required permissions to the role (Option A) or user (Option B):
 
    ```
    {
@@ -136,11 +192,42 @@ Use the following steps to prepare your workflow for running on your EC2 self-ho
 2. Add the keys to GitHub secrets.
 3. Use the [aws-actions/configure-aws-credentials](https://github.com/aws-actions/configure-aws-credentials) action to set up the keys as environment variables.
 
-**2. Prepare GitHub personal access token**
+**2. Prepare the GitHub token**
 
-1. Create a new GitHub personal access token with the `repo` scope.
-   The action will use the token for self-hosted runners management in the GitHub account on the repository level.
-2. Add the token to GitHub secrets.
+The action's `github-token` input needs permission to manage self-hosted runners on the target repo — specifically it hits `POST /repos/:owner/:repo/actions/runners/registration-token` and `DELETE /repos/:owner/:repo/actions/runners/:id`. Three token types work; pick the lowest-privilege one your setup supports.
+
+**Option A (preferred): GitHub App installation token.** No human identity, no long-lived secret.
+
+1. Create a GitHub App in your org with the permissions below. Grant it installation on the target repo.
+2. In the workflow, mint a short-lived installation token via `actions/create-github-app-token@<sha>` and pass its output to this action's `github-token` input.
+
+   ```yaml
+   - uses: actions/create-github-app-token@<sha>
+     id: app-token
+     with:
+       app-id: ${{ vars.RUNNER_APP_ID }}
+       private-key: ${{ secrets.RUNNER_APP_PRIVATE_KEY }}
+   - uses: namecheap/ec2-github-runner@<sha>
+     with:
+       mode: start
+       github-token: ${{ steps.app-token.outputs.token }}
+       # ...
+   ```
+
+   **Minimum permissions for the App:**
+   - Repository — **Administration**: Read and write.
+
+**Option B: fine-grained personal access token.** Scoped to specific repos, per-resource permissions. Expires. Better than a classic PAT, worse than an App because it's tied to a human identity.
+
+1. GitHub → Settings → Developer settings → Fine-grained tokens → Generate new.
+2. Resource owner: your org. Repositories: only the repos where this action runs.
+3. Repository permissions: **Administration: Read and write**. Nothing else.
+4. Store as a GitHub secret; pass via `github-token`.
+
+**Option C (deprecated): classic personal access token.** Grants repo-wide permissions far broader than this action needs. Tied to a human identity — CI breaks when the person leaves the org. Only use this if neither of the above is available.
+
+1. Scope: `repo` (necessary evil — finer-grained scopes don't exist on classic PATs).
+2. Store as a GitHub secret; pass via `github-token`.
 
 **3. Prepare EC2 image**
 
