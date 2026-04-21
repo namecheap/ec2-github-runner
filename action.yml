@@ -70,6 +70,17 @@ inputs:
       IAM Role Name to attach to the created EC2 instance.
       This requires additional permissions on the AWS role used to launch instances.
     required: false
+  http-tokens:
+    description: >-
+      Instance Metadata Service (IMDS) token mode. Accepted values:
+        - 'required' (default): IMDSv2-only. Any request to the IMDS
+          endpoint (169.254.169.254) must present a session token.
+          Mitigates SSRF-style credential theft.
+        - 'optional': IMDSv1 and IMDSv2 both work. Only set this if
+          a consumer workflow explicitly needs IMDSv1 compatibility.
+      Passed through to RunInstances MetadataOptions.HttpTokens.
+    required: false
+    default: 'required'
   debug:
     description: >-
       When 'true', the action emits extra diagnostic output to the

@@ -131,6 +131,18 @@ describe('Config — mode validation', () => {
   });
 });
 
+describe('Config — http-tokens input', () => {
+  test('defaults to "required" when unset', () => {
+    const config = loadConfig(startModeInputs);
+    expect(config.input.httpTokens).toBe('required');
+  });
+
+  test('honors an "optional" override', () => {
+    const config = loadConfig({ ...startModeInputs, 'http-tokens': 'optional' });
+    expect(config.input.httpTokens).toBe('optional');
+  });
+});
+
 describe('Config — debug input', () => {
   test('defaults to "false" when unset', () => {
     const config = loadConfig(startModeInputs);

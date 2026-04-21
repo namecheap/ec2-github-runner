@@ -96,6 +96,15 @@ async function startEc2Instance(label, githubRegistrationToken) {
     SecurityGroupIds: [config.input.securityGroupId],
     IamInstanceProfile: { Name: config.input.iamRoleName },
     TagSpecifications: config.tagSpecifications,
+    // IMDSv2 required by default. Mitigates SSRF-style IAM credential
+    // theft from the runner — any metadata request must present a
+    // session token. HttpPutResponseHopLimit: 1 prevents the token
+    // from reaching containerized workloads one hop deeper.
+    MetadataOptions: {
+      HttpTokens: config.input.httpTokens,
+      HttpPutResponseHopLimit: 1,
+      HttpEndpoint: 'enabled',
+    },
   };
 
   let ec2InstanceId;
