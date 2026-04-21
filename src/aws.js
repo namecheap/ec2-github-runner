@@ -1,27 +1,61 @@
-const AWS = require('aws-sdk');
+const {
+  EC2Client,
+  DescribeImagesCommand,
+  RunInstancesCommand,
+  TerminateInstancesCommand,
+  AssociateAddressCommand,
+  waitUntilInstanceRunning,
+} = require('@aws-sdk/client-ec2');
 const core = require('@actions/core');
 const config = require('./config');
 const { sortByCreationDate } = require('./utils');
 
+// EC2Client reads region + credentials from the environment (set by
+// aws-actions/configure-aws-credentials or by the instance profile on
+// self-hosted runners). A single shared client is fine — commands are
+// stateless.
+function ec2Client() {
+  return new EC2Client({});
+}
+
 async function waitForInstanceRunning(ec2InstanceId) {
-  const ec2 = new AWS.EC2();
-
-  const params = {
-    InstanceIds: [ec2InstanceId],
-  };
-
   try {
-    await ec2.waitFor('instanceRunning', params).promise();
+    await waitUntilInstanceRunning(
+      { client: ec2Client(), maxWaitTime: 300 },
+      { InstanceIds: [ec2InstanceId] },
+    );
     core.info(`AWS EC2 instance ${ec2InstanceId} is up and running`);
-    return;
   } catch (error) {
     core.error(`AWS EC2 instance ${ec2InstanceId} initialization error`);
     throw error;
   }
 }
 
+async function resolveImageId(client) {
+  if (config.input.ec2ImageId) {
+    return config.input.ec2ImageId;
+  }
+
+  const amiParams = {
+    Filters: [
+      ...config.input.ec2ImageFilters,
+      { Name: 'state', Values: ['available'] },
+    ],
+  };
+  if (config.input.ec2ImageOwner) {
+    amiParams.Owners = [config.input.ec2ImageOwner];
+  }
+
+  const result = await client.send(new DescribeImagesCommand(amiParams));
+  if (!result.Images || result.Images.length === 0) {
+    throw new Error('Unable to find AMI using passed filter');
+  }
+  sortByCreationDate(result);
+  return result.Images[0].ImageId;
+}
+
 async function startEc2Instance(label, githubRegistrationToken) {
-  const ec2 = new AWS.EC2();
+  const client = ec2Client();
 
   // User data scripts are run as the root user.
   // Docker and git are necessary for GitHub runner and should be pre-installed on the AMI.
@@ -39,30 +73,7 @@ async function startEc2Instance(label, githubRegistrationToken) {
     './run.sh',
   ];
 
-  if (!config.input.ec2ImageId) {
-    const amiParams = {
-      Filters: [
-        ...config.input.ec2ImageFilters,
-        {
-          Name: 'state',
-          Values: [
-            'available'
-          ]
-        },
-      ]
-    };
-    if (config.input.ec2ImageOwner) {
-      amiParams.Owners = [ config.input.ec2ImageOwner ];
-    }
-
-    const result = await ec2.describeImages(amiParams).promise();
-    if (result.Images.length === 0) {
-      throw new Error('Unable to find AMI using passed filter');
-    }
-    sortByCreationDate(result);
-
-    config.input.ec2ImageId = result.Images[0].ImageId;
-  }
+  config.input.ec2ImageId = await resolveImageId(client);
 
   const params = {
     ImageId: config.input.ec2ImageId,
@@ -78,7 +89,7 @@ async function startEc2Instance(label, githubRegistrationToken) {
 
   let ec2InstanceId;
   try {
-    const result = await ec2.runInstances(params).promise();
+    const result = await client.send(new RunInstancesCommand(params));
     ec2InstanceId = result.Instances[0].InstanceId;
     core.info(`AWS EC2 instance ${ec2InstanceId} is started`);
   } catch (error) {
@@ -89,13 +100,11 @@ async function startEc2Instance(label, githubRegistrationToken) {
   if (config.input.eipAllocationId) {
     await waitForInstanceRunning(ec2InstanceId);
 
-    const params = {
-      AllocationId: config.input.eipAllocationId,
-      InstanceId: ec2InstanceId,
-    };
-
     try {
-      await ec2.associateAddress(params).promise();
+      await client.send(new AssociateAddressCommand({
+        AllocationId: config.input.eipAllocationId,
+        InstanceId: ec2InstanceId,
+      }));
     } catch (error) {
       core.warning(`Elastic IP association error, trying to proceed w/o EIP: ${error.message}`);
     }
@@ -105,16 +114,13 @@ async function startEc2Instance(label, githubRegistrationToken) {
 }
 
 async function terminateEc2Instance() {
-  const ec2 = new AWS.EC2();
-
-  const params = {
-    InstanceIds: [config.input.ec2InstanceId],
-  };
+  const client = ec2Client();
 
   try {
-    await ec2.terminateInstances(params).promise();
+    await client.send(new TerminateInstancesCommand({
+      InstanceIds: [config.input.ec2InstanceId],
+    }));
     core.info(`AWS EC2 instance ${config.input.ec2InstanceId} is terminated`);
-    return;
   } catch (error) {
     core.error(`AWS EC2 instance ${config.input.ec2InstanceId} termination error`);
     throw error;

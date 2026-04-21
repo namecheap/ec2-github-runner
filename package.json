@@ -20,11 +20,11 @@
   "dependencies": {
     "@actions/core": "^1.2.6",
     "@actions/github": "^4.0.0",
-    "aws-sdk": "^2.809.0",
+    "@aws-sdk/client-ec2": "3.1033.0",
     "lodash": "^4.17.21"
   },
   "devDependencies": {
-    "@vercel/ncc": "^0.25.1",
+    "@vercel/ncc": "0.38.4",
     "dotenv": "^8.2.0",
     "eslint": "^7.15.0",
     "jest": "29.7.0"
