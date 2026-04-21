@@ -87857,6 +87857,7 @@ const config = __nccwpck_require__(1283);
 const log = __nccwpck_require__(7223);
 const { withRetry } = __nccwpck_require__(6759);
 const { sortByCreationDate } = __nccwpck_require__(5804);
+const checksums = __nccwpck_require__(2874);
 
 // EC2Client reads region + credentials from the environment (set by
 // aws-actions/configure-aws-credentials or by the instance profile on
@@ -87914,20 +87915,88 @@ async function resolveImageId(client) {
 async function startEc2Instance(label, githubRegistrationToken) {
   const client = ec2Client();
 
-  // User data scripts are run as the root user.
-  // Docker and git are necessary for GitHub runner and should be pre-installed on the AMI.
+  // Bootstrap design notes (fix-forward after ec2-github-runner#18/#19/#20):
+  //
+  // - Hashes for the runner tarball come from src/runner-checksums.js
+  //   (hardcoded table, cross-checked against the release body in CI).
+  //   The earlier `curl -fsSL <tarball>.sha256` approach died because
+  //   actions/runner doesn't publish per-tarball .sha256 sidecars.
+  //
+  // - Dedicated 'runner' user via useradd + sudo -u. The old
+  //   RUNNER_ALLOW_RUNASROOT=1 escape hatch is gone. Runner has its
+  //   own home under /home/runner/ and writes config.sh state there.
+  //
+  // - --ephemeral --unattended --disableupdate on config.sh: one-job
+  //   runner, no interactive prompts, no runtime self-update during
+  //   the session. GitHub auto-deregisters ephemeral runners after
+  //   their job, making the removeRunner() API call in gh.js become
+  //   belt-and-braces rather than the primary deregister path.
+  //
+  // - set -euo pipefail across both the outer and inner (runner-user)
+  //   shells so ANY failure kills the bootstrap immediately. Made
+  //   failures diagnosable in the Phase 4.b attempt (see #20 for the
+  //   `aws ec2 get-console-output --latest` recipe).
+  const runnerVersion = config.input.runnerVersion;
+  const owner = config.githubContext.owner;
+  const repo = config.githubContext.repo;
+  const shaX64 = checksums.lookup('x64', runnerVersion);
+  const shaArm64 = checksums.lookup('arm64', runnerVersion);
+  if (!shaX64 || !shaArm64) {
+    throw new Error(
+      `No SHA-256 entry in src/runner-checksums.js for runner-version ${runnerVersion}. ` +
+      'Add the x64 + arm64 hashes from the release body at ' +
+      `https://github.com/actions/runner/releases/tag/v${runnerVersion}`,
+    );
+  }
+
   const userData = [
     '#!/bin/bash',
+    'set -euo pipefail',
+    '',
+    '# Root-required setup.',
     'mount -o remount,size=1G /tmp',
-    'yum install -y libicu make',
-    'mkdir actions-runner && cd actions-runner',
-    'case $(uname -m) in aarch64) ARCH="arm64" ;; amd64|x86_64) ARCH="x64" ;; esac && export RUNNER_ARCH=${ARCH}',
-    'curl -O -L https://github.com/actions/runner/releases/download/v2.333.1/actions-runner-linux-${RUNNER_ARCH}-2.333.1.tar.gz',
-    'tar xzf ./actions-runner-linux-${RUNNER_ARCH}-2.333.1.tar.gz',
-    'export RUNNER_ALLOW_RUNASROOT=1',
+    'yum install -y libicu make sudo',
+    '',
+    '# Create the non-root runner user (idempotent).',
+    'if ! id runner >/dev/null 2>&1; then',
+    '  useradd -m -s /bin/bash runner',
+    'fi',
+    '',
+    '# Drop to the runner user for download + configure + run.',
+    "sudo -u runner -H bash <<'RUNNER_BOOTSTRAP'",
+    'set -euo pipefail',
+    'cd "$HOME"',
+    'mkdir -p actions-runner && cd actions-runner',
+    '',
+    'case "$(uname -m)" in',
+    '  aarch64) RUNNER_ARCH="arm64" ;;',
+    '  amd64|x86_64) RUNNER_ARCH="x64" ;;',
+    '  *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;;',
+    'esac',
+    '',
+    `RUNNER_VERSION="${runnerVersion}"`,
+    'TARBALL="actions-runner-linux-${RUNNER_ARCH}-${RUNNER_VERSION}.tar.gz"',
+    'BASE="https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}"',
+    '',
+    'curl -fsSLo "$TARBALL" "$BASE/$TARBALL"',
+    '',
+    '# SHA-256 verification against the hash baked into the action at',
+    '# build time (src/runner-checksums.js). The table is kept in sync',
+    '# with upstream by the verify-runner-url CI job on every PR.',
+    'case "$RUNNER_ARCH" in',
+    `  x64) EXPECTED_SHA="${shaX64}" ;;`,
+    `  arm64) EXPECTED_SHA="${shaArm64}" ;;`,
+    '  *) echo "no checksum for arch $RUNNER_ARCH" >&2; exit 1 ;;',
+    'esac',
+    'echo "$EXPECTED_SHA  $TARBALL" | sha256sum -c -',
+    '',
+    'tar xzf "$TARBALL"',
+    '',
     'export DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1',
-    `./config.sh --url https://github.com/${config.githubContext.owner}/${config.githubContext.repo} --token ${githubRegistrationToken} --labels ${label}`,
+    `./config.sh --url "https://github.com/${owner}/${repo}" --token "${githubRegistrationToken}" --labels "${label}" --ephemeral --unattended --disableupdate`,
     './run.sh',
+    'RUNNER_BOOTSTRAP',
+    '',
   ];
 
   config.input.ec2ImageId = await resolveImageId(client);
@@ -88042,6 +88111,7 @@ class Config {
       label: core.getInput('label'),
       ec2InstanceId: core.getInput('ec2-instance-id'),
       iamRoleName: core.getInput('iam-role-name'),
+      runnerVersion: core.getInput('runner-version') || '2.333.1',
       httpTokens: core.getInput('http-tokens') || 'required',
       debug: core.getInput('debug') || 'false',
     };
@@ -88365,6 +88435,48 @@ async function withRetry(step, fn, opts = {}) {
 
 module.exports = {
   withRetry,
+};
+
+
+/***/ }),
+
+/***/ 2874:
+/***/ ((module) => {
+
+// Expected SHA-256 sums for actions/runner tarballs, keyed by
+// `${arch}-${version}`.
+//
+// Why hardcoded: actions/runner doesn't publish per-tarball .sha256
+// sidecar files (see ec2-github-runner#20 for the empirical proof —
+// `curl -fsSL <tarball>.sha256` returns 404 and killed the Phase 4
+// bootstrap under `set -euo pipefail`). Hashes ARE published in the
+// release body as HTML-comment-wrapped markdown, but parsing that
+// at boot time means an api.github.com round trip on every runner
+// start and hits the unauth rate limit quickly at org scale.
+//
+// Maintenance: whenever the `runner-version` default bumps in
+// action.yml, add the matching hashes here from the release body at
+// https://github.com/actions/runner/releases/tag/v<version>. The
+// `verify-runner-url` CI job cross-checks every entry against the
+// live release body on every PR, so a drift between this table and
+// upstream is caught at code-review time, not at runtime.
+//
+// Sources:
+//   https://github.com/actions/runner/releases/tag/v2.333.1
+
+const CHECKSUMS = {
+  // v2.333.1 — pinned default as of 2026-04-21.
+  'x64-2.333.1':   '18f8f68ed1892854ff2ab1bab4fcaa2f5abeedc98093b6cb13638991725cab74',
+  'arm64-2.333.1': '69ac7e5692f877189e7dddf4a1bb16cbbd6425568cd69a0359895fac48b9ad3b',
+};
+
+function lookup(arch, version) {
+  return CHECKSUMS[`${arch}-${version}`] || null;
+}
+
+module.exports = {
+  CHECKSUMS,
+  lookup,
 };
 
 

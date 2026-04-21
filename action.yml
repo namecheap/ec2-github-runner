@@ -70,6 +70,15 @@ inputs:
       IAM Role Name to attach to the created EC2 instance.
       This requires additional permissions on the AWS role used to launch instances.
     required: false
+  runner-version:
+    description: >-
+      Version of the actions/runner binary to download and register.
+      Must be one of the versions for which an entry exists in
+      src/runner-checksums.js (the action verifies the downloaded
+      tarball's SHA-256 against that table before extraction). To
+      override, add the corresponding hash to the table in a PR.
+    required: false
+    default: '2.333.1'
   http-tokens:
     description: >-
       Instance Metadata Service (IMDS) token mode. Accepted values:
