@@ -32,14 +32,16 @@ jobs:
       - name: Install packages
         run: npm ci
       - name: Rebuild dist
-        # @vercel/ncc 0.25.1 uses a webpack version that needs the
-        # legacy OpenSSL provider on modern Node for module hashing.
-        run: NODE_OPTIONS=--openssl-legacy-provider npm run package
+        run: npm run package
       - name: Fail if dist/ differs from committed copy
+        # ncc 0.38 produces code-split chunks alongside dist/index.js
+        # (e.g. dist/136.index.js); the whole dist/ tree must stay in
+        # sync with src/.
         run: |
-          if ! git diff --quiet -- dist/; then
-            echo "::error::dist/index.js is out of sync with src/."
-            echo "::error::Run 'NODE_OPTIONS=--openssl-legacy-provider npm run package' locally and commit the rebuilt dist/."
+          if ! git diff --quiet -- dist/ || [ -n "$(git status --porcelain -- dist/)" ]; then
+            echo "::error::dist/ is out of sync with src/."
+            echo "::error::Run 'npm run package' locally and commit the rebuilt dist/."
+            git status --porcelain -- dist/
             git diff --stat -- dist/
             exit 1
           fi
