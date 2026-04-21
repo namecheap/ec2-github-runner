@@ -63,21 +63,25 @@ jobs:
         run: npm test
 
   verify-runner-url:
-    name: Verify pinned actions/runner release exists
+    name: Verify pinned actions/runner release + checksum table
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Extract runner version from src/aws.js
+      - name: Extract default runner version from action.yml
         id: extract
         run: |
-          version=$(grep -oE 'actions/runner/releases/download/v[0-9]+\.[0-9]+\.[0-9]+' src/aws.js | head -1 | sed 's|.*/v||')
+          # action.yml declares:
+          #   runner-version:
+          #     ...
+          #     default: '2.333.1'
+          version=$(awk '/^  runner-version:/{found=1} found && /^    default:/{gsub(/[^0-9.]/, "", $2); print $2; exit}' action.yml)
           if [ -z "$version" ]; then
-            echo "::error::Could not locate the pinned actions/runner version in src/aws.js"
+            echo "::error::Could not locate the default runner-version in action.yml"
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "Pinned actions/runner: v$version"
+          echo "Default actions/runner: v$version"
       - name: HEAD check the Linux x64 release asset
         env:
           VERSION: ${{ steps.extract.outputs.version }}
@@ -85,3 +89,37 @@ jobs:
           url="https://github.com/actions/runner/releases/download/v${VERSION}/actions-runner-linux-x64-${VERSION}.tar.gz"
           echo "Checking $url"
           curl -fsSLI -o /dev/null "$url"
+      - name: Cross-check src/runner-checksums.js against release body
+        env:
+          VERSION: ${{ steps.extract.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Pull the release body once.
+          body=$(gh api "/repos/actions/runner/releases/tags/v${VERSION}" --jq .body)
+
+          # Extract upstream hashes from HTML-comment-wrapped markdown like:
+          #   <!-- BEGIN SHA linux-x64 -->hex<!-- END SHA linux-x64 -->
+          upstream_x64=$(printf '%s' "$body" | grep -oE 'BEGIN SHA linux-x64 -->[a-f0-9]+' | cut -d'>' -f2)
+          upstream_arm64=$(printf '%s' "$body" | grep -oE 'BEGIN SHA linux-arm64 -->[a-f0-9]+' | cut -d'>' -f2)
+
+          if [ -z "$upstream_x64" ] || [ -z "$upstream_arm64" ]; then
+            echo "::error::Could not parse linux-x64 / linux-arm64 SHA from release body"
+            exit 1
+          fi
+
+          # Extract committed hashes from src/runner-checksums.js by loading
+          # it as a Node module. The module exports { CHECKSUMS, lookup(...) }.
+          committed_x64=$(node -e "console.log(require('./src/runner-checksums').lookup('x64', process.env.VERSION) || '')")
+          committed_arm64=$(node -e "console.log(require('./src/runner-checksums').lookup('arm64', process.env.VERSION) || '')")
+
+          ok=true
+          if [ "$upstream_x64" != "$committed_x64" ]; then
+            echo "::error::runner-checksums.js x64-$VERSION ($committed_x64) != upstream ($upstream_x64)"
+            ok=false
+          fi
+          if [ "$upstream_arm64" != "$committed_arm64" ]; then
+            echo "::error::runner-checksums.js arm64-$VERSION ($committed_arm64) != upstream ($upstream_arm64)"
+            ok=false
+          fi
+          $ok
+          echo "Checksums verified for v$VERSION (x64 + arm64)."
