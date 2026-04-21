@@ -87854,6 +87854,7 @@ const {
 } = __nccwpck_require__(5193);
 const core = __nccwpck_require__(7484);
 const config = __nccwpck_require__(1283);
+const log = __nccwpck_require__(7223);
 const { sortByCreationDate } = __nccwpck_require__(5804);
 
 // EC2Client reads region + credentials from the environment (set by
@@ -87865,13 +87866,17 @@ function ec2Client() {
 }
 
 async function waitForInstanceRunning(ec2InstanceId) {
+  const start = Date.now();
+  log.info('wait_for_instance', { instance_id: ec2InstanceId });
   try {
     await waitUntilInstanceRunning(
       { client: ec2Client(), maxWaitTime: 300 },
       { InstanceIds: [ec2InstanceId] },
     );
+    log.info('wait_for_instance', { instance_id: ec2InstanceId, elapsed_ms: Date.now() - start });
     core.info(`AWS EC2 instance ${ec2InstanceId} is up and running`);
   } catch (error) {
+    log.error('wait_for_instance', { instance_id: ec2InstanceId, error: error.name, message: error.message });
     core.error(`AWS EC2 instance ${ec2InstanceId} initialization error`);
     throw error;
   }
@@ -87892,12 +87897,17 @@ async function resolveImageId(client) {
     amiParams.Owners = [config.input.ec2ImageOwner];
   }
 
+  log.info('describe_images', { owner: config.input.ec2ImageOwner || null, filters: config.input.ec2ImageFilters });
   const result = await client.send(new DescribeImagesCommand(amiParams));
   if (!result.Images || result.Images.length === 0) {
+    log.error('describe_images', { match_count: 0 });
     throw new Error('Unable to find AMI using passed filter');
   }
   sortByCreationDate(result);
-  return result.Images[0].ImageId;
+  const picked = result.Images[0].ImageId;
+  log.info('describe_images', { match_count: result.Images.length, selected_ami: picked });
+  log.debug('describe_images_all', { images: result.Images.map(i => ({ id: i.ImageId, name: i.Name, created: i.CreationDate })) });
+  return picked;
 }
 
 async function startEc2Instance(label, githubRegistrationToken) {
@@ -87934,11 +87944,22 @@ async function startEc2Instance(label, githubRegistrationToken) {
   };
 
   let ec2InstanceId;
+  const runStart = Date.now();
+  log.info('run_instance', {
+    ami_id: config.input.ec2ImageId,
+    instance_type: config.input.ec2InstanceType,
+    subnet_id: config.input.subnetId,
+    sg_id: config.input.securityGroupId,
+    iam_role: config.input.iamRoleName || null,
+    label,
+  });
   try {
     const result = await client.send(new RunInstancesCommand(params));
     ec2InstanceId = result.Instances[0].InstanceId;
+    log.info('run_instance', { instance_id: ec2InstanceId, elapsed_ms: Date.now() - runStart });
     core.info(`AWS EC2 instance ${ec2InstanceId} is started`);
   } catch (error) {
+    log.error('run_instance', { error: error.name, message: error.message });
     core.error('AWS EC2 instance starting error');
     throw error;
   }
@@ -87947,11 +87968,13 @@ async function startEc2Instance(label, githubRegistrationToken) {
     await waitForInstanceRunning(ec2InstanceId);
 
     try {
+      log.info('associate_address', { allocation_id: config.input.eipAllocationId, instance_id: ec2InstanceId });
       await client.send(new AssociateAddressCommand({
         AllocationId: config.input.eipAllocationId,
         InstanceId: ec2InstanceId,
       }));
     } catch (error) {
+      log.warn('associate_address', { allocation_id: config.input.eipAllocationId, instance_id: ec2InstanceId, error: error.name, message: error.message });
       core.warning(`Elastic IP association error, trying to proceed w/o EIP: ${error.message}`);
     }
   }
@@ -87962,12 +87985,16 @@ async function startEc2Instance(label, githubRegistrationToken) {
 async function terminateEc2Instance() {
   const client = ec2Client();
 
+  const start = Date.now();
+  log.info('terminate_instance', { instance_id: config.input.ec2InstanceId });
   try {
     await client.send(new TerminateInstancesCommand({
       InstanceIds: [config.input.ec2InstanceId],
     }));
+    log.info('terminate_instance', { instance_id: config.input.ec2InstanceId, elapsed_ms: Date.now() - start });
     core.info(`AWS EC2 instance ${config.input.ec2InstanceId} is terminated`);
   } catch (error) {
+    log.error('terminate_instance', { instance_id: config.input.ec2InstanceId, error: error.name, message: error.message });
     core.error(`AWS EC2 instance ${config.input.ec2InstanceId} termination error`);
     throw error;
   }
@@ -88003,6 +88030,7 @@ class Config {
       label: core.getInput('label'),
       ec2InstanceId: core.getInput('ec2-instance-id'),
       iamRoleName: core.getInput('iam-role-name'),
+      debug: core.getInput('debug') || 'false',
     };
 
     const tags = JSON.parse(core.getInput('aws-resource-tags'));
@@ -88069,6 +88097,7 @@ const core = __nccwpck_require__(7484);
 const github = __nccwpck_require__(3228);
 const _ = __nccwpck_require__(9975);
 const config = __nccwpck_require__(1283);
+const log = __nccwpck_require__(7223);
 
 // use the unique label to find the runner
 // as we don't have the runner's id, it's not possible to get it in any other way
@@ -88087,12 +88116,16 @@ async function getRunner(label) {
 // get GitHub Registration Token for registering a self-hosted runner
 async function getRegistrationToken() {
   const octokit = github.getOctokit(config.input.githubToken);
+  const start = Date.now();
+  log.info('gh_registration_token', { ...config.githubContext });
 
   try {
     const response = await octokit.request('POST /repos/{owner}/{repo}/actions/runners/registration-token', config.githubContext);
+    log.info('gh_registration_token', { ...config.githubContext, elapsed_ms: Date.now() - start });
     core.info('GitHub Registration Token is received');
     return response.data.token;
   } catch (error) {
+    log.error('gh_registration_token', { error: error.name, message: error.message, status: error.status });
     core.error('GitHub Registration Token receiving error');
     throw error;
   }
@@ -88104,15 +88137,20 @@ async function removeRunner() {
 
   // skip the runner removal process if the runner is not found
   if (!runner) {
+    log.info('remove_runner', { label: config.input.label, skipped: true, reason: 'not_found' });
     core.info(`GitHub self-hosted runner with label ${config.input.label} is not found, so the removal is skipped`);
     return;
   }
 
+  const start = Date.now();
+  log.info('remove_runner', { runner_id: runner.id, label: config.input.label });
   try {
     await octokit.request('DELETE /repos/{owner}/{repo}/actions/runners/{runner_id}', _.merge(config.githubContext, { runner_id: runner.id }));
+    log.info('remove_runner', { runner_id: runner.id, label: config.input.label, elapsed_ms: Date.now() - start });
     core.info(`GitHub self-hosted runner ${runner.name} is removed`);
     return;
   } catch (error) {
+    log.error('remove_runner', { runner_id: runner.id, label: config.input.label, error: error.name, message: error.message });
     core.error('GitHub self-hosted runner removal error');
     throw error;
   }
@@ -88131,14 +88169,17 @@ async function waitForRunnerRegistered(label) {
   return new Promise((resolve, reject) => {
     const interval = setInterval(async () => {
       const runner = await getRunner(label);
+      log.debug('wait_for_runner_poll', { label, elapsed_s: waitSeconds, found: !!runner, status: runner ? runner.status : null });
 
       if (waitSeconds > timeoutMinutes * 60) {
+        log.error('wait_for_runner', { label, timeout_minutes: timeoutMinutes });
         core.error('GitHub self-hosted runner registration error');
         clearInterval(interval);
         reject(`A timeout of ${timeoutMinutes} minutes is exceeded. Your AWS EC2 instance was not able to register itself in GitHub as a new self-hosted runner.`);
       }
 
       if (runner && runner.status === 'online') {
+        log.info('wait_for_runner', { label, runner_id: runner.id, elapsed_s: waitSeconds });
         core.info(`GitHub self-hosted runner ${runner.name} is registered and ready to use`);
         clearInterval(interval);
         resolve();
@@ -88154,6 +88195,105 @@ module.exports = {
   getRegistrationToken,
   removeRunner,
   waitForRunnerRegistered,
+};
+
+
+/***/ }),
+
+/***/ 7223:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const core = __nccwpck_require__(7484);
+
+// Structured logger. Every notable lifecycle event emits a JSON-shaped
+// line via core.info so the Actions run summary can be scraped or
+// eyeballed without parsing free-form text. When config.input.debug is
+// true the debug() helper also emits, which gives consumers a way to
+// get verbose diagnostics without changing default output.
+//
+// Gotchas:
+//   - We defer `require('./config')` until first use because log.js is
+//     loaded transitively from src/index.js before config validation
+//     completes; importing at top-level would short-circuit on any
+//     config error.
+//   - sanitize() redacts values under known secret keys. Always pass
+//     raw fields through sanitize() before logging an object that may
+//     contain user input (tokens, credentials, etc.).
+
+const SECRET_KEYS = new Set([
+  'githubToken',
+  'github-token',
+  'token',
+  'aws-access-key-id',
+  'aws-secret-access-key',
+  'GPG_PRIVATE_KEY',
+  'password',
+]);
+
+function sanitize(fields) {
+  if (!fields || typeof fields !== 'object') return fields;
+  const out = Array.isArray(fields) ? [] : {};
+  for (const [k, v] of Object.entries(fields)) {
+    if (SECRET_KEYS.has(k)) {
+      out[k] = '***';
+    } else if (v && typeof v === 'object') {
+      out[k] = sanitize(v);
+    } else {
+      out[k] = v;
+    }
+  }
+  return out;
+}
+
+function emit(level, step, fields) {
+  const payload = {
+    step,
+    mode: (() => {
+      // best-effort mode lookup; log.js may be required before Config
+      // finishes its constructor, in which case config.input is undefined.
+      try {
+        const config = __nccwpck_require__(1283);
+        return config && config.input ? config.input.mode : undefined;
+      } catch (_e) {
+        return undefined;
+      }
+    })(),
+    ...(fields ? sanitize(fields) : {}),
+  };
+  const line = JSON.stringify(payload);
+  switch (level) {
+    case 'warning':
+      core.warning(line);
+      break;
+    case 'error':
+      core.error(line);
+      break;
+    default:
+      core.info(line);
+  }
+}
+
+function info(step, fields) { emit('info', step, fields); }
+function warn(step, fields) { emit('warning', step, fields); }
+function err(step, fields) { emit('error', step, fields); }
+
+function debug(step, fields) {
+  try {
+    const config = __nccwpck_require__(1283);
+    if (config && config.input && config.input.debug === 'true') {
+      emit('info', step, { debug: true, ...fields });
+    }
+  } catch (_e) {
+    // Config not yet loaded — skip debug output.
+  }
+}
+
+module.exports = {
+  info,
+  warn,
+  error: err,
+  debug,
+  sanitize,
 };
 
 
@@ -88639,6 +88779,7 @@ const os = __nccwpck_require__(857);
 const aws = __nccwpck_require__(3776);
 const gh = __nccwpck_require__(5934);
 const config = __nccwpck_require__(1283);
+const log = __nccwpck_require__(7223);
 const core = __nccwpck_require__(7484);
 
 // Write directly to the $GITHUB_OUTPUT file. The bundled @actions/core
@@ -88656,23 +88797,38 @@ function setOutput(label, ec2InstanceId) {
 }
 
 async function start() {
-  const label = config.generateUniqueLabel();
-  const githubRegistrationToken = await gh.getRegistrationToken();
-  const ec2InstanceId = await aws.startEc2Instance(label, githubRegistrationToken);
-  setOutput(label, ec2InstanceId);
-  await aws.waitForInstanceRunning(ec2InstanceId);
-  await gh.waitForRunnerRegistered(label);
+  core.startGroup('start-runner');
+  try {
+    log.debug('start_inputs', config.input); // sanitized inside log.js
+    const label = config.generateUniqueLabel();
+    const githubRegistrationToken = await gh.getRegistrationToken();
+    const ec2InstanceId = await aws.startEc2Instance(label, githubRegistrationToken);
+    setOutput(label, ec2InstanceId);
+    await aws.waitForInstanceRunning(ec2InstanceId);
+    await gh.waitForRunnerRegistered(label);
+    log.info('start', { label, instance_id: ec2InstanceId, outcome: 'registered' });
+  } finally {
+    core.endGroup();
+  }
 }
 
 async function stop() {
-  await aws.terminateEc2Instance();
-  await gh.removeRunner();
+  core.startGroup('stop-runner');
+  try {
+    log.debug('stop_inputs', config.input);
+    await aws.terminateEc2Instance();
+    await gh.removeRunner();
+    log.info('stop', { instance_id: config.input.ec2InstanceId, label: config.input.label, outcome: 'ok' });
+  } finally {
+    core.endGroup();
+  }
 }
 
 (async function () {
   try {
     config.input.mode === 'start' ? await start() : await stop();
   } catch (error) {
+    log.error('fatal', { mode: config.input.mode, error: error.name, message: error.message });
     core.error(error);
     core.setFailed(error.message);
   }

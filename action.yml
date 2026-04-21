@@ -70,6 +70,15 @@ inputs:
       IAM Role Name to attach to the created EC2 instance.
       This requires additional permissions on the AWS role used to launch instances.
     required: false
+  debug:
+    description: >-
+      When 'true', the action emits extra diagnostic output to the
+      Actions run log: input parameters (secrets redacted), AWS SDK
+      response metadata, runner-registration poll details. Leave at
+      'false' for normal operation. Set 'true' when troubleshooting
+      bootstrap failures.
+    required: false
+    default: 'false'
   aws-resource-tags:
     description: >-
       Tags to attach to the launched EC2 instance and volume.
