@@ -131,6 +131,18 @@ describe('Config — mode validation', () => {
   });
 });
 
+describe('Config — debug input', () => {
+  test('defaults to "false" when unset', () => {
+    const config = loadConfig(startModeInputs);
+    expect(config.input.debug).toBe('false');
+  });
+
+  test('honors "true"', () => {
+    const config = loadConfig({ ...startModeInputs, 'debug': 'true' });
+    expect(config.input.debug).toBe('true');
+  });
+});
+
 describe('Config — generateUniqueLabel', () => {
   test('returns a 5-character alphanumeric string', () => {
     const config = loadConfig(startModeInputs);
