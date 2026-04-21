@@ -3,6 +3,7 @@ const github = require('@actions/github');
 const _ = require('lodash');
 const config = require('./config');
 const log = require('./log');
+const { withRetry } = require('./retry');
 
 // use the unique label to find the runner
 // as we don't have the runner's id, it's not possible to get it in any other way
@@ -50,7 +51,9 @@ async function removeRunner() {
   const start = Date.now();
   log.info('remove_runner', { runner_id: runner.id, label: config.input.label });
   try {
-    await octokit.request('DELETE /repos/{owner}/{repo}/actions/runners/{runner_id}', _.merge(config.githubContext, { runner_id: runner.id }));
+    await withRetry('remove_runner', () =>
+      octokit.request('DELETE /repos/{owner}/{repo}/actions/runners/{runner_id}', _.merge(config.githubContext, { runner_id: runner.id })),
+    );
     log.info('remove_runner', { runner_id: runner.id, label: config.input.label, elapsed_ms: Date.now() - start });
     core.info(`GitHub self-hosted runner ${runner.name} is removed`);
     return;
