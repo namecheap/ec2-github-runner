@@ -9,6 +9,7 @@ const {
 const core = require('@actions/core');
 const config = require('./config');
 const log = require('./log');
+const { withRetry } = require('./retry');
 const { sortByCreationDate } = require('./utils');
 
 // EC2Client reads region + credentials from the environment (set by
@@ -142,9 +143,11 @@ async function terminateEc2Instance() {
   const start = Date.now();
   log.info('terminate_instance', { instance_id: config.input.ec2InstanceId });
   try {
-    await client.send(new TerminateInstancesCommand({
-      InstanceIds: [config.input.ec2InstanceId],
-    }));
+    await withRetry('terminate_instance', () =>
+      client.send(new TerminateInstancesCommand({
+        InstanceIds: [config.input.ec2InstanceId],
+      })),
+    );
     log.info('terminate_instance', { instance_id: config.input.ec2InstanceId, elapsed_ms: Date.now() - start });
     core.info(`AWS EC2 instance ${config.input.ec2InstanceId} is terminated`);
   } catch (error) {

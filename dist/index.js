@@ -87855,6 +87855,7 @@ const {
 const core = __nccwpck_require__(7484);
 const config = __nccwpck_require__(1283);
 const log = __nccwpck_require__(7223);
+const { withRetry } = __nccwpck_require__(6759);
 const { sortByCreationDate } = __nccwpck_require__(5804);
 
 // EC2Client reads region + credentials from the environment (set by
@@ -87988,9 +87989,11 @@ async function terminateEc2Instance() {
   const start = Date.now();
   log.info('terminate_instance', { instance_id: config.input.ec2InstanceId });
   try {
-    await client.send(new TerminateInstancesCommand({
-      InstanceIds: [config.input.ec2InstanceId],
-    }));
+    await withRetry('terminate_instance', () =>
+      client.send(new TerminateInstancesCommand({
+        InstanceIds: [config.input.ec2InstanceId],
+      })),
+    );
     log.info('terminate_instance', { instance_id: config.input.ec2InstanceId, elapsed_ms: Date.now() - start });
     core.info(`AWS EC2 instance ${config.input.ec2InstanceId} is terminated`);
   } catch (error) {
@@ -88098,6 +88101,7 @@ const github = __nccwpck_require__(3228);
 const _ = __nccwpck_require__(9975);
 const config = __nccwpck_require__(1283);
 const log = __nccwpck_require__(7223);
+const { withRetry } = __nccwpck_require__(6759);
 
 // use the unique label to find the runner
 // as we don't have the runner's id, it's not possible to get it in any other way
@@ -88145,7 +88149,9 @@ async function removeRunner() {
   const start = Date.now();
   log.info('remove_runner', { runner_id: runner.id, label: config.input.label });
   try {
-    await octokit.request('DELETE /repos/{owner}/{repo}/actions/runners/{runner_id}', _.merge(config.githubContext, { runner_id: runner.id }));
+    await withRetry('remove_runner', () =>
+      octokit.request('DELETE /repos/{owner}/{repo}/actions/runners/{runner_id}', _.merge(config.githubContext, { runner_id: runner.id })),
+    );
     log.info('remove_runner', { runner_id: runner.id, label: config.input.label, elapsed_ms: Date.now() - start });
     core.info(`GitHub self-hosted runner ${runner.name} is removed`);
     return;
@@ -88294,6 +88300,61 @@ module.exports = {
   error: err,
   debug,
   sanitize,
+};
+
+
+/***/ }),
+
+/***/ 6759:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const log = __nccwpck_require__(7223);
+
+// Run `fn()` with exponential backoff. `fn` returns a Promise. Retries
+// on any rejection; does not look at error shape (callers should only
+// pass idempotent operations like DELETE /runners/{id} and
+// TerminateInstances — re-executing on transient errors is safe).
+//
+// Defaults: 3 attempts, 2s base delay, doubled each time, capped at
+// 10s. Total worst-case wait is 2s + 4s + 8s = 14s.
+async function withRetry(step, fn, opts = {}) {
+  const attempts = opts.attempts || 3;
+  const baseMs = opts.baseMs || 2000;
+  const maxMs = opts.maxMs || 10000;
+
+  let lastError;
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error;
+      if (i === attempts) {
+        log.error(`${step}_retry`, {
+          attempt: i,
+          attempts,
+          exhausted: true,
+          error: error.name,
+          message: error.message,
+        });
+        throw error;
+      }
+      const delayMs = Math.min(baseMs * 2 ** (i - 1), maxMs);
+      log.warn(`${step}_retry`, {
+        attempt: i,
+        attempts,
+        next_delay_ms: delayMs,
+        error: error.name,
+        message: error.message,
+      });
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+  /* istanbul ignore next — unreachable, for type safety */
+  throw lastError;
+}
+
+module.exports = {
+  withRetry,
 };
 
 
@@ -88814,10 +88875,30 @@ async function start() {
 
 async function stop() {
   core.startGroup('stop-runner');
+  const failures = [];
   try {
     log.debug('stop_inputs', config.input);
-    await aws.terminateEc2Instance();
-    await gh.removeRunner();
+
+    // Attempt both cleanups independently — neither should short-circuit
+    // the other. A GitHub API failure must not prevent EC2 termination
+    // (billing) and vice versa. Both have internal retries via
+    // withRetry(); catch here is the last line of defense.
+    try {
+      await aws.terminateEc2Instance();
+    } catch (error) {
+      failures.push({ step: 'terminate_instance', error: error.name, message: error.message });
+    }
+    try {
+      await gh.removeRunner();
+    } catch (error) {
+      failures.push({ step: 'remove_runner', error: error.name, message: error.message });
+    }
+
+    if (failures.length > 0) {
+      log.error('stop', { outcome: 'partial', failures });
+      const summary = failures.map((f) => `${f.step}: ${f.message}`).join('; ');
+      throw new Error(`stop mode completed with ${failures.length} cleanup failure(s): ${summary}`);
+    }
     log.info('stop', { instance_id: config.input.ec2InstanceId, label: config.input.label, outcome: 'ok' });
   } finally {
     core.endGroup();

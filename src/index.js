@@ -53,10 +53,30 @@ async function start() {
 
 async function stop() {
   core.startGroup('stop-runner');
+  const failures = [];
   try {
     log.debug('stop_inputs', config.input);
-    await aws.terminateEc2Instance();
-    await gh.removeRunner();
+
+    // Attempt both cleanups independently — neither should short-circuit
+    // the other. A GitHub API failure must not prevent EC2 termination
+    // (billing) and vice versa. Both have internal retries via
+    // withRetry(); catch here is the last line of defense.
+    try {
+      await aws.terminateEc2Instance();
+    } catch (error) {
+      failures.push({ step: 'terminate_instance', error: error.name, message: error.message });
+    }
+    try {
+      await gh.removeRunner();
+    } catch (error) {
+      failures.push({ step: 'remove_runner', error: error.name, message: error.message });
+    }
+
+    if (failures.length > 0) {
+      log.error('stop', { outcome: 'partial', failures });
+      const summary = failures.map((f) => `${f.step}: ${f.message}`).join('; ');
+      throw new Error(`stop mode completed with ${failures.length} cleanup failure(s): ${summary}`);
+    }
     log.info('stop', { instance_id: config.input.ec2InstanceId, label: config.input.label, outcome: 'ok' });
   } finally {
     core.endGroup();
