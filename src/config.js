@@ -16,6 +16,7 @@ class Config {
       label: core.getInput('label'),
       ec2InstanceId: core.getInput('ec2-instance-id'),
       iamRoleName: core.getInput('iam-role-name'),
+      httpTokens: core.getInput('http-tokens') || 'required',
       debug: core.getInput('debug') || 'false',
     };
 
