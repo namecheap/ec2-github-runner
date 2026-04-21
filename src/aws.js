@@ -57,52 +57,19 @@ async function resolveImageId(client) {
 async function startEc2Instance(label, githubRegistrationToken) {
   const client = ec2Client();
 
-  // User-data runs as root. Phase 4's original attempt to drop to a
-  // dedicated 'runner' user via sudo-heredoc broke dogfood in
-  // terraform-provider-namecheap#182 — the EC2 instance came up but the
-  // runner never registered within the 5 min action timeout. Reverted
-  // here to the root-execution path the pre-Phase-4 bootstrap used,
-  // isolating the non-root move for a separate investigation.
-  //
-  // Kept from the Phase 4 work (all verified independently of the
-  // root/non-root axis):
-  //   - set -euo pipefail — fail fast on any bootstrap error.
-  //   - --ephemeral + --unattended + --disableupdate on config.sh —
-  //     one-job runner, no interactive prompts, no runner auto-update.
-  //   - SHA-256 verification of the runner tarball against the
-  //     published .sha256 sidecar before extraction.
-  //   - Parameterized runner-version via config.input.runnerVersion.
-  const runnerVersion = config.input.runnerVersion;
-  const owner = config.githubContext.owner;
-  const repo = config.githubContext.repo;
+  // User data scripts are run as the root user.
+  // Docker and git are necessary for GitHub runner and should be pre-installed on the AMI.
   const userData = [
     '#!/bin/bash',
-    'set -euo pipefail',
-    '',
     'mount -o remount,size=1G /tmp',
     'yum install -y libicu make',
-    '',
     'mkdir actions-runner && cd actions-runner',
-    '',
-    'case "$(uname -m)" in',
-    '  aarch64) RUNNER_ARCH="arm64" ;;',
-    '  amd64|x86_64) RUNNER_ARCH="x64" ;;',
-    '  *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;;',
-    'esac',
-    '',
-    `RUNNER_VERSION="${runnerVersion}"`,
-    'TARBALL="actions-runner-linux-${RUNNER_ARCH}-${RUNNER_VERSION}.tar.gz"',
-    'BASE="https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}"',
-    '',
-    'curl -fsSLo "$TARBALL" "$BASE/$TARBALL"',
-    'expected="$(curl -fsSL "$BASE/$TARBALL.sha256" | awk \'{print $1}\')"',
-    'echo "$expected  $TARBALL" | sha256sum -c -',
-    '',
-    'tar xzf "$TARBALL"',
-    '',
+    'case $(uname -m) in aarch64) ARCH="arm64" ;; amd64|x86_64) ARCH="x64" ;; esac && export RUNNER_ARCH=${ARCH}',
+    'curl -O -L https://github.com/actions/runner/releases/download/v2.333.1/actions-runner-linux-${RUNNER_ARCH}-2.333.1.tar.gz',
+    'tar xzf ./actions-runner-linux-${RUNNER_ARCH}-2.333.1.tar.gz',
     'export RUNNER_ALLOW_RUNASROOT=1',
     'export DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1',
-    `./config.sh --url "https://github.com/${owner}/${repo}" --token "${githubRegistrationToken}" --labels "${label}" --ephemeral --unattended --disableupdate`,
+    `./config.sh --url https://github.com/${config.githubContext.owner}/${config.githubContext.repo} --token ${githubRegistrationToken} --labels ${label}`,
     './run.sh',
   ];
 
