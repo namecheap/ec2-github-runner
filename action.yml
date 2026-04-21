@@ -70,6 +70,15 @@ inputs:
       IAM Role Name to attach to the created EC2 instance.
       This requires additional permissions on the AWS role used to launch instances.
     required: false
+  runner-version:
+    description: >-
+      Version of the actions/runner binary to download and register.
+      Must match a released tag from https://github.com/actions/runner/releases
+      (without the 'v' prefix). Defaults to the version tested with this action release.
+      Bumping this lets consumers pick up a newer runner (e.g. when GitHub gates
+      JS actions on a newer node runtime) without waiting for an action release.
+    required: false
+    default: '2.333.1'
   aws-resource-tags:
     description: >-
       Tags to attach to the launched EC2 instance and volume.
