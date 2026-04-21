@@ -18,6 +18,7 @@ class Config {
       iamRoleName: core.getInput('iam-role-name'),
       runnerVersion: core.getInput('runner-version') || '2.333.1',
       httpTokens: core.getInput('http-tokens') || 'required',
+      encryptEbs: core.getInput('encrypt-ebs') || 'false',
       debug: core.getInput('debug') || 'false',
     };
 
