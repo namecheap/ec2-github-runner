@@ -7,6 +7,13 @@ Run the job on it.
 Finally, stop it when you finish.
 And all this automatically as a part of your GitHub Actions workflow.
 
+> [!IMPORTANT]
+> **Supported operating systems: yum-based Linux only.**
+>
+> The bootstrap script that this action injects as EC2 `user-data` is hardcoded to use `yum`, `useradd`, `sudo`, `bash`, and a `tmpfs` `/tmp`. That means the AMI you pass via `ec2-image-id` **must** be a yum-based distribution — Amazon Linux 2023 (the tested baseline), Amazon Linux 2, or a RHEL-family image (RHEL / CentOS Stream / Rocky / Alma) whose `/tmp` is mounted as tmpfs.
+>
+> **Debian, Ubuntu, Alpine, and any other non-yum distributions are not supported.** If you launch this action against such an AMI, the EC2 instance will boot but the runner bootstrap will fail silently inside cloud-init, and the action will eventually time out with a registration error. Cross-distro support is not on the roadmap — if you need it, fork and replace the `userData` array in `src/aws.js`.
+
 ![GitHub Actions self-hosted EC2 runner](docs/images/github-actions-summary.png)
 
 See [below](#example) the YAML code of the depicted workflow. <br><br>
@@ -232,10 +239,8 @@ The action's `github-token` input needs permission to manage self-hosted runners
 
 **3. Prepare EC2 image**
 
-1. Create a new EC2 instance based on any Linux distribution you need.
-2. Connect to the instance using SSH, install `docker` and `git`, then enable `docker` service.
-
-   For Amazon Linux 2, it looks like the following:
+1. Create a new EC2 instance based on a **yum-based Linux distribution** — see the [Supported operating systems](#on-demand-self-hosted-aws-ec2-runner-for-github-actions) notice above. Amazon Linux 2023 is the tested baseline.
+2. Connect to the instance using SSH, install `docker` and `git`, then enable `docker` service:
 
    ```
     sudo yum update -y && \
@@ -243,8 +248,6 @@ The action's `github-token` input needs permission to manage self-hosted runners
     sudo yum install git -y && \
     sudo systemctl enable docker
    ```
-
-   For other Linux distributions, it could be slightly different.
 
 3. Install any other tools required for your workflow.
 4. Create a new EC2 image (AMI) from the instance.
@@ -273,7 +276,7 @@ Now you're ready to go!
 | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `mode`                                                                                                                                                                       | Always required.                           | Specify here which mode you want to use: <br> - `start` - to start a new runner; <br> - `stop` - to stop the previously created runner.                                                                                                                                                                                               |
 | `github-token`                                                                                                                                                               | Always required.                           | GitHub Personal Access Token with the `repo` scope assigned.                                                                                                                                                                                                                                                                          |
-| `ec2-image-id`                                                                                                                                                               | Required if you use the `start` mode.      | EC2 Image Id (AMI). <br><br> The new runner will be launched from this image. <br><br> The action is compatible with Amazon Linux 2 images.                                                                                                                                                                                           |
+| `ec2-image-id`                                                                                                                                                               | Required if you use the `start` mode.      | EC2 Image Id (AMI). <br><br> The new runner will be launched from this image. <br><br> Only **yum-based** AMIs are supported (Amazon Linux 2023 tested; AL2 / RHEL-family in principle). See the [Supported operating systems](#on-demand-self-hosted-aws-ec2-runner-for-github-actions) notice at the top of this README.                                                                                                                                                                                           |
 | `ec2-instance-type`                                                                                                                                                          | Required if you use the `start` mode.      | EC2 Instance Type.                                                                                                                                                                                                                                                                                                                    |
 | `subnet-id`                                                                                                                                                                  | Required if you use the `start` mode.      | VPC Subnet Id. <br><br> The subnet should belong to the same VPC as the specified security group.                                                                                                                                                                                                                                     |
 | `security-group-id`                                                                                                                                                          | Required if you use the `start` mode.      | EC2 Security Group Id. <br><br> The security group should belong to the same VPC as the specified subnet. <br><br> Only the outbound traffic for port 443 should be allowed. No inbound traffic is required.                                                                                                                          |
