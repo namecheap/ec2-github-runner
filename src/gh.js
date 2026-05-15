@@ -1,6 +1,5 @@
 const core = require('@actions/core');
 const github = require('@actions/github');
-const _ = require('lodash');
 const config = require('./config');
 const log = require('./log');
 const { withRetry } = require('./retry');
@@ -12,8 +11,8 @@ async function getRunner(label) {
 
   try {
     const runners = await octokit.paginate('GET /repos/{owner}/{repo}/actions/runners', config.githubContext);
-    const foundRunners = _.filter(runners, { labels: [{ name: label }] });
-    return foundRunners.length > 0 ? foundRunners[0] : null;
+    const foundRunner = runners.find(r => r.labels.some(l => l.name === label));
+    return foundRunner || null;
   } catch (error) {
     return null;
   }
@@ -52,7 +51,7 @@ async function removeRunner() {
   log.info('remove_runner', { runner_id: runner.id, label: config.input.label });
   try {
     await withRetry('remove_runner', () =>
-      octokit.request('DELETE /repos/{owner}/{repo}/actions/runners/{runner_id}', _.merge(config.githubContext, { runner_id: runner.id })),
+      octokit.request('DELETE /repos/{owner}/{repo}/actions/runners/{runner_id}', { ...config.githubContext, runner_id: runner.id }),
     );
     log.info('remove_runner', { runner_id: runner.id, label: config.input.label, elapsed_ms: Date.now() - start });
     core.info(`GitHub self-hosted runner ${runner.name} is removed`);
