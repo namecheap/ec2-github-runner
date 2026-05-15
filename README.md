@@ -134,7 +134,8 @@ This action reads AWS credentials from the environment. Two paths — pick one.
            "ec2:RunInstances",
            "ec2:TerminateInstances",
            "ec2:DescribeInstances",
-           "ec2:DescribeInstanceStatus"
+           "ec2:DescribeInstanceStatus",
+           "ec2:DescribeImages"
          ],
          "Resource": "*"
        }
