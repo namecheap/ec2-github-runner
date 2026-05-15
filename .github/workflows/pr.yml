@@ -1,17 +1,15 @@
 name: PR automations
 on:
   pull_request:
-    branches:
-      - main
 jobs:
   lint-code:
     name: Lint code
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
       - name: Cache dependencies
-        uses: actions/cache@v2
+        uses: actions/cache@v4
         with:
           path: '**/node_modules'
           key: ec2-github-runner-${{ hashFiles('**/package-lock.json') }}
@@ -19,3 +17,109 @@ jobs:
         run: npm install
       - name: Run linter
         run: npm run lint
+
+  verify-dist:
+    name: Verify dist is up to date
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install packages
+        run: npm ci
+      - name: Rebuild dist
+        run: npm run package
+      - name: Fail if dist/ differs from committed copy
+        # ncc 0.38 produces code-split chunks alongside dist/index.js
+        # (e.g. dist/136.index.js); the whole dist/ tree must stay in
+        # sync with src/.
+        run: |
+          if ! git diff --quiet -- dist/ || [ -n "$(git status --porcelain -- dist/)" ]; then
+            echo "::error::dist/ is out of sync with src/."
+            echo "::error::Run 'npm run package' locally and commit the rebuilt dist/."
+            git status --porcelain -- dist/
+            git diff --stat -- dist/
+            exit 1
+          fi
+
+  unit-tests:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install packages
+        run: npm ci
+      - name: Run jest
+        run: npm test
+
+  verify-runner-url:
+    name: Verify pinned actions/runner release + checksum table
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Extract default runner version from action.yml
+        id: extract
+        run: |
+          # action.yml declares:
+          #   runner-version:
+          #     ...
+          #     default: '2.333.1'
+          version=$(awk '/^  runner-version:/{found=1} found && /^    default:/{gsub(/[^0-9.]/, "", $2); print $2; exit}' action.yml)
+          if [ -z "$version" ]; then
+            echo "::error::Could not locate the default runner-version in action.yml"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Default actions/runner: v$version"
+      - name: HEAD check the Linux x64 release asset
+        env:
+          VERSION: ${{ steps.extract.outputs.version }}
+        run: |
+          url="https://github.com/actions/runner/releases/download/v${VERSION}/actions-runner-linux-x64-${VERSION}.tar.gz"
+          echo "Checking $url"
+          curl -fsSLI -o /dev/null "$url"
+      - name: Cross-check src/runner-checksums.js against release body
+        env:
+          VERSION: ${{ steps.extract.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Pull the release body once.
+          body=$(gh api "/repos/actions/runner/releases/tags/v${VERSION}" --jq .body)
+
+          # Extract upstream hashes from HTML-comment-wrapped markdown like:
+          #   <!-- BEGIN SHA linux-x64 -->hex<!-- END SHA linux-x64 -->
+          upstream_x64=$(printf '%s' "$body" | grep -oE 'BEGIN SHA linux-x64 -->[a-f0-9]+' | cut -d'>' -f2)
+          upstream_arm64=$(printf '%s' "$body" | grep -oE 'BEGIN SHA linux-arm64 -->[a-f0-9]+' | cut -d'>' -f2)
+
+          if [ -z "$upstream_x64" ] || [ -z "$upstream_arm64" ]; then
+            echo "::error::Could not parse linux-x64 / linux-arm64 SHA from release body"
+            exit 1
+          fi
+
+          # Extract committed hashes from src/runner-checksums.js by loading
+          # it as a Node module. The module exports { CHECKSUMS, lookup(...) }.
+          committed_x64=$(node -e "console.log(require('./src/runner-checksums').lookup('x64', process.env.VERSION) || '')")
+          committed_arm64=$(node -e "console.log(require('./src/runner-checksums').lookup('arm64', process.env.VERSION) || '')")
+
+          ok=true
+          if [ "$upstream_x64" != "$committed_x64" ]; then
+            echo "::error::runner-checksums.js x64-$VERSION ($committed_x64) != upstream ($upstream_x64)"
+            ok=false
+          fi
+          if [ "$upstream_arm64" != "$committed_arm64" ]; then
+            echo "::error::runner-checksums.js arm64-$VERSION ($committed_arm64) != upstream ($upstream_arm64)"
+            ok=false
+          fi
+          $ok
+          echo "Checksums verified for v$VERSION (x64 + arm64)."

@@ -70,6 +70,48 @@ inputs:
       IAM Role Name to attach to the created EC2 instance.
       This requires additional permissions on the AWS role used to launch instances.
     required: false
+  runner-version:
+    description: >-
+      Version of the actions/runner binary to download and register.
+      Must be one of the versions for which an entry exists in
+      src/runner-checksums.js (the action verifies the downloaded
+      tarball's SHA-256 against that table before extraction). To
+      override, add the corresponding hash to the table in a PR.
+    required: false
+    default: '2.333.1'
+  encrypt-ebs:
+    description: >-
+      When 'true', the root EBS volume is created with SSE-EBS
+      encryption enabled (AWS-managed KMS key, 'alias/aws/ebs', in
+      the launch account). Requires that the account either has
+      default EBS encryption enabled or can use the default AWS-
+      managed KMS key. The AMI's BlockDeviceMapping is cloned and
+      patched with 'Encrypted: true'; volume size / type / IOPS
+      are preserved from the AMI. Default 'false' to avoid
+      regressing consumers whose IAM / KMS policy doesn't allow
+      this — opt in explicitly when you've verified the permissions.
+    required: false
+    default: 'false'
+  http-tokens:
+    description: >-
+      Instance Metadata Service (IMDS) token mode. Accepted values:
+        - 'required' (default): IMDSv2-only. Any request to the IMDS
+          endpoint (169.254.169.254) must present a session token.
+          Mitigates SSRF-style credential theft.
+        - 'optional': IMDSv1 and IMDSv2 both work. Only set this if
+          a consumer workflow explicitly needs IMDSv1 compatibility.
+      Passed through to RunInstances MetadataOptions.HttpTokens.
+    required: false
+    default: 'required'
+  debug:
+    description: >-
+      When 'true', the action emits extra diagnostic output to the
+      Actions run log: input parameters (secrets redacted), AWS SDK
+      response metadata, runner-registration poll details. Leave at
+      'false' for normal operation. Set 'true' when troubleshooting
+      bootstrap failures.
+    required: false
+    default: 'false'
   aws-resource-tags:
     description: >-
       Tags to attach to the launched EC2 instance and volume.
@@ -89,5 +131,5 @@ outputs:
       EC2 Instance Id of the created runner.
       The id is used to terminate the EC2 instance when the runner is not needed anymore.
 runs:
-  using: node12
+  using: node24
   main: ./dist/index.js
