@@ -17,9 +17,12 @@
     "test": "jest",
     "package": "ncc build ./src/index.js"
   },
+  "overrides": {
+    "undici": "^6.26.0"
+  },
   "dependencies": {
-    "@actions/core": "^1.2.6",
-    "@actions/github": "^4.0.0",
+    "@actions/core": "^1.11.1",
+    "@actions/github": "^8.0.1",
     "@aws-sdk/client-ec2": "3.1033.0"
   },
   "devDependencies": {
