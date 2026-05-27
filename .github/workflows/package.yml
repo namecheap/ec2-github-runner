@@ -9,6 +9,10 @@ jobs:
   package:
     name: Package distribution files
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -20,6 +24,10 @@ jobs:
         run: npm run lint
       - name: Package
         run: npm run package
+      - name: Attest dist provenance
+        uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
+        with:
+          subject-path: dist/index.js
       - name: Commit
         run: |
           git config --global user.name "GitHub Actions"
