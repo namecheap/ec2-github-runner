@@ -1,21 +1,18 @@
 // Tests for buildEncryptedRootMapping. The function is a pure transform
 // of a DescribeImages response — no AWS/GitHub stubbing required.
 //
-// aws.js requires ./config at module load; mock it so the require chain
-// resolves without a valid Config singleton (tests don't touch config-
-// dependent code paths in this file).
-
-beforeAll(() => {
-  jest.doMock('../src/config', () => ({
-    input: { mode: 'start', debug: 'false' },
-    githubContext: { owner: 'o', repo: 'r' },
-    tagSpecifications: null,
-  }));
-  jest.doMock('@actions/core', () => ({
-    info: jest.fn(), warning: jest.fn(), error: jest.fn(), setFailed: jest.fn(), getInput: jest.fn(),
-    startGroup: jest.fn(), endGroup: jest.fn(),
-  }));
-});
+// aws.js and config.js are required at module load time, so mocks must be
+// in place before any require() runs. jest.mock() is hoisted by Jest's
+// transform and executes before module-level require() calls.
+jest.mock('../src/config', () => ({
+  input: { mode: 'start', debug: 'false' },
+  githubContext: { owner: 'o', repo: 'r' },
+  tagSpecifications: null,
+}));
+jest.mock('@actions/core', () => ({
+  info: jest.fn(), warning: jest.fn(), error: jest.fn(), setFailed: jest.fn(), getInput: jest.fn(),
+  startGroup: jest.fn(), endGroup: jest.fn(),
+}));
 
 const { buildEncryptedRootMapping } = require('../src/aws');
 
