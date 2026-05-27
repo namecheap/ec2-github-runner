@@ -1,4 +1,4 @@
-const js = require('@eslint/js');
+const js = require('@eslint/js'); // bundled with eslint@9
 const globals = require('globals');
 
 module.exports = [
@@ -15,6 +15,7 @@ module.exports = [
     rules: {
       'no-use-before-define': 'error',
       'prefer-const': 'error',
+      'no-unused-vars': ['error', { caughtErrorsIgnorePattern: '^_' }],
     },
   },
 ];

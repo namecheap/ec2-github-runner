@@ -13,7 +13,7 @@ async function getRunner(label) {
     const runners = await octokit.paginate('GET /repos/{owner}/{repo}/actions/runners', config.githubContext);
     const foundRunner = runners.find(r => r.labels.some(l => l.name === label));
     return foundRunner || null;
-  } catch (error) {
+  } catch (_error) {
     return null;
   }
 }
