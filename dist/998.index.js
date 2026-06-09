@@ -238,10 +238,9 @@ var protocols$1 = __webpack_require__(7288);
 const defaultSSOHttpAuthSchemeParametersProvider = async (config, context, input) => {
     return {
         operation: client.getSmithyContext(context).operation,
-        region: (await client.normalizeProvider(config.region)()) ||
-            (() => {
-                throw new Error("expected `region` to be configured for `aws.auth#sigv4`");
-            })(),
+        region: await client.normalizeProvider(config.region)() || (() => {
+            throw new Error("expected `region` to be configured for `aws.auth#sigv4`");
+        })(),
     };
 };
 function createAwsAuthSigv4HttpAuthOption(authParameters) {
@@ -298,7 +297,7 @@ const commonParams = {
     UseDualStack: { type: "builtInParams", name: "useDualstackEndpoint" },
 };
 
-var version = "3.997.11";
+var version = "3.997.17";
 var packageInfo = {
 	version: version};
 
@@ -313,7 +312,7 @@ const _data = {
         [e, [{ [k]: "UseDualStack" }, b]],
         [e, [{ fn: f, argv: [h, "supportsDualStack"] }, b]],
         [e, [{ fn: f, argv: [h, "supportsFIPS"] }, b]],
-        ["stringEquals", [{ fn: f, argv: [h, "name"] }, "aws-us-gov"]],
+        ["stringEquals", [{ fn: f, argv: [h, "name"] }, "aws-us-gov"]]
     ],
     results: [
         [a],
@@ -328,54 +327,26 @@ const _data = {
         ["https://portal.sso.{Region}.{PartitionResult#dualStackDnsSuffix}", i],
         [a, "DualStack is enabled but this partition does not support DualStack"],
         ["https://portal.sso.{Region}.{PartitionResult#dnsSuffix}", i],
-        [a, "Invalid Configuration: Missing Region"],
-    ],
+        [a, "Invalid Configuration: Missing Region"]
+    ]
 };
 const root = 2;
 const r = 100_000_000;
 const nodes = new Int32Array([
-    -1,
-    1,
-    -1,
-    0,
-    13,
-    3,
-    1,
-    4,
-    r + 12,
-    2,
-    5,
-    r + 12,
-    3,
-    8,
-    6,
-    4,
-    7,
-    r + 11,
-    5,
-    r + 9,
-    r + 10,
-    4,
-    11,
-    9,
-    6,
-    10,
-    r + 8,
-    7,
-    r + 6,
-    r + 7,
-    5,
-    12,
-    r + 5,
-    6,
-    r + 4,
-    r + 5,
-    3,
-    r + 1,
-    14,
-    4,
-    r + 2,
-    r + 3,
+    -1, 1, -1,
+    0, 13, 3,
+    1, 4, r + 12,
+    2, 5, r + 12,
+    3, 8, 6,
+    4, 7, r + 11,
+    5, r + 9, r + 10,
+    4, 11, 9,
+    6, 10, r + 8,
+    7, r + 6, r + 7,
+    5, 12, r + 5,
+    6, r + 4, r + 5,
+    3, r + 1, 14,
+    4, r + 2, r + 3,
 ]);
 const bdd = endpoints.BinaryDecisionDiagram.from(nodes, root, _data.conditions, _data.results);
 
@@ -482,54 +453,54 @@ const _s_registry = schema.TypeRegistry.for(_s);
 var SSOServiceException$ = [-3, _s, "SSOServiceException", 0, [], []];
 _s_registry.registerError(SSOServiceException$, SSOServiceException);
 const n0_registry = schema.TypeRegistry.for(n0);
-var InvalidRequestException$ = [-3, n0, _IRE, { [_e]: _c, [_hE]: 400 }, [_m], [0]];
+var InvalidRequestException$ = [-3, n0, _IRE,
+    { [_e]: _c, [_hE]: 400 },
+    [_m],
+    [0]
+];
 n0_registry.registerError(InvalidRequestException$, InvalidRequestException);
-var ResourceNotFoundException$ = [-3, n0, _RNFE, { [_e]: _c, [_hE]: 404 }, [_m], [0]];
+var ResourceNotFoundException$ = [-3, n0, _RNFE,
+    { [_e]: _c, [_hE]: 404 },
+    [_m],
+    [0]
+];
 n0_registry.registerError(ResourceNotFoundException$, ResourceNotFoundException);
-var TooManyRequestsException$ = [-3, n0, _TMRE, { [_e]: _c, [_hE]: 429 }, [_m], [0]];
+var TooManyRequestsException$ = [-3, n0, _TMRE,
+    { [_e]: _c, [_hE]: 429 },
+    [_m],
+    [0]
+];
 n0_registry.registerError(TooManyRequestsException$, TooManyRequestsException);
-var UnauthorizedException$ = [-3, n0, _UE, { [_e]: _c, [_hE]: 401 }, [_m], [0]];
+var UnauthorizedException$ = [-3, n0, _UE,
+    { [_e]: _c, [_hE]: 401 },
+    [_m],
+    [0]
+];
 n0_registry.registerError(UnauthorizedException$, UnauthorizedException);
-const errorTypeRegistries = [_s_registry, n0_registry];
+const errorTypeRegistries = [
+    _s_registry,
+    n0_registry,
+];
 var AccessTokenType = [0, n0, _ATT, 8, 0];
 var SecretAccessKeyType = [0, n0, _SAKT, 8, 0];
 var SessionTokenType = [0, n0, _STT, 8, 0];
-var GetRoleCredentialsRequest$ = [
-    3,
-    n0,
-    _GRCR,
+var GetRoleCredentialsRequest$ = [3, n0, _GRCR,
     0,
     [_rN, _aI, _aT],
-    [
-        [0, { [_hQ]: _rn }],
-        [0, { [_hQ]: _ai }],
-        [() => AccessTokenType, { [_hH]: _xasbt }],
-    ],
-    3,
+    [[0, { [_hQ]: _rn }], [0, { [_hQ]: _ai }], [() => AccessTokenType, { [_hH]: _xasbt }]], 3
 ];
-var GetRoleCredentialsResponse$ = [
-    3,
-    n0,
-    _GRCRe,
+var GetRoleCredentialsResponse$ = [3, n0, _GRCRe,
     0,
     [_rC],
-    [[() => RoleCredentials$, 0]],
+    [[() => RoleCredentials$, 0]]
 ];
-var RoleCredentials$ = [
-    3,
-    n0,
-    _RC,
+var RoleCredentials$ = [3, n0, _RC,
     0,
     [_aKI, _sAK, _sT, _ex],
-    [0, [() => SecretAccessKeyType, 0], [() => SessionTokenType, 0], 1],
+    [0, [() => SecretAccessKeyType, 0], [() => SessionTokenType, 0], 1]
 ];
-var GetRoleCredentials$ = [
-    9,
-    n0,
-    _GRC,
-    { [_h]: ["GET", "/federation/credentials", 200] },
-    () => GetRoleCredentialsRequest$,
-    () => GetRoleCredentialsResponse$,
+var GetRoleCredentials$ = [9, n0, _GRC,
+    { [_h]: ["GET", "/federation/credentials", 200] }, () => GetRoleCredentialsRequest$, () => GetRoleCredentialsResponse$
 ];
 
 const getRuntimeConfig$1 = (config) => {
@@ -585,11 +556,9 @@ const getRuntimeConfig = (config$1) => {
         defaultsMode,
         authSchemePreference: config$1?.authSchemePreference ?? config.loadConfig(httpAuthSchemes.NODE_AUTH_SCHEME_PREFERENCE_OPTIONS, loaderConfig),
         bodyLengthChecker: config$1?.bodyLengthChecker ?? serde.calculateBodyLength,
-        defaultUserAgentProvider: config$1?.defaultUserAgentProvider ??
-            client$1.createDefaultUserAgentProvider({ serviceId: clientSharedValues.serviceId, clientVersion: packageInfo.version }),
+        defaultUserAgentProvider: config$1?.defaultUserAgentProvider ?? client$1.createDefaultUserAgentProvider({ serviceId: clientSharedValues.serviceId, clientVersion: packageInfo.version }),
         maxAttempts: config$1?.maxAttempts ?? config.loadConfig(retry.NODE_MAX_ATTEMPT_CONFIG_OPTIONS, config$1),
-        region: config$1?.region ??
-            config.loadConfig(config.NODE_REGION_CONFIG_OPTIONS, { ...config.NODE_REGION_CONFIG_FILE_OPTIONS, ...loaderConfig }),
+        region: config$1?.region ?? config.loadConfig(config.NODE_REGION_CONFIG_OPTIONS, { ...config.NODE_REGION_CONFIG_FILE_OPTIONS, ...loaderConfig }),
         requestHandler: nodeHttpHandler.NodeHttpHandler.create(config$1?.requestHandler ?? defaultConfigProvider),
         retryMode: config$1?.retryMode ??
             config.loadConfig({
