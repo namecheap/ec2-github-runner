@@ -22,15 +22,16 @@
     "test-exclude": "^8.0.0"
   },
   "dependencies": {
-    "@actions/core": "^1.11.1",
+    "@actions/core": "^2.0.3",
     "@actions/github": "^8.0.1",
-    "@aws-sdk/client-ec2": "3.1033.0"
+    "@aws-sdk/client-ec2": "3.1064.0"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@vercel/ncc": "0.38.4",
-    "dotenv": "^8.2.0",
-    "eslint": "^9.39.4",
-    "globals": "^15.15.0",
+    "dotenv": "^17.4.2",
+    "eslint": "^10.4.1",
+    "globals": "^17.6.0",
     "jest": "^30.4.2"
   }
 }

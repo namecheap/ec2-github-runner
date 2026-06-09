@@ -1,4 +1,4 @@
-const js = require('@eslint/js'); // bundled with eslint@9
+const js = require('@eslint/js'); // explicit dep: eslint@10 no longer bundles it
 const globals = require('globals');
 
 module.exports = [
