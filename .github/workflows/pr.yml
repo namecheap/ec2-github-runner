@@ -74,7 +74,7 @@ jobs:
           # action.yml declares:
           #   runner-version:
           #     ...
-          #     default: '2.333.1'
+          #     default: '2.335.1'
           version=$(awk '/^  runner-version:/{found=1} found && /^    default:/{gsub(/[^0-9.]/, "", $2); print $2; exit}' action.yml)
           if [ -z "$version" ]; then
             echo "::error::Could not locate the default runner-version in action.yml"

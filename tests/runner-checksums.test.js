@@ -22,11 +22,11 @@ describe('runner-checksums', () => {
   });
 
   test('lookup returns the expected value for a known key', () => {
-    expect(checksums.lookup('x64', '2.333.1')).toBe(
-      '18f8f68ed1892854ff2ab1bab4fcaa2f5abeedc98093b6cb13638991725cab74',
+    expect(checksums.lookup('x64', '2.335.1')).toBe(
+      '4ef2f25285f0ae4477f1fe1e346db76d2f3ebf03824e2ddd1973a2819bf6c8cf',
     );
-    expect(checksums.lookup('arm64', '2.333.1')).toBe(
-      '69ac7e5692f877189e7dddf4a1bb16cbbd6425568cd69a0359895fac48b9ad3b',
+    expect(checksums.lookup('arm64', '2.335.1')).toBe(
+      '6d1e85bfd1a506a8b17c1f1b9b57dba458ffed90898799aaa9f599520b0d9207',
     );
   });
 
@@ -35,6 +35,6 @@ describe('runner-checksums', () => {
   });
 
   test('lookup returns null for an unsupported arch', () => {
-    expect(checksums.lookup('riscv', '2.333.1')).toBeNull();
+    expect(checksums.lookup('riscv', '2.335.1')).toBeNull();
   });
 });

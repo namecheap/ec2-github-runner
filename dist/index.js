@@ -96478,7 +96478,7 @@ class Config {
       label: core.getInput('label'),
       ec2InstanceId: core.getInput('ec2-instance-id'),
       iamRoleName: core.getInput('iam-role-name'),
-      runnerVersion: core.getInput('runner-version') || '2.333.1',
+      runnerVersion: core.getInput('runner-version') || '2.335.1',
       httpTokens: core.getInput('http-tokens') || 'required',
       encryptEbs: core.getInput('encrypt-ebs') || 'false',
       debug: core.getInput('debug') || 'false',
@@ -96829,12 +96829,13 @@ module.exports = {
 // upstream is caught at code-review time, not at runtime.
 //
 // Sources:
-//   https://github.com/actions/runner/releases/tag/v2.333.1
+//   https://github.com/actions/runner/releases/tag/v2.335.1
 
 const CHECKSUMS = {
-  // v2.333.1 — pinned default as of 2026-04-21.
-  'x64-2.333.1':   '18f8f68ed1892854ff2ab1bab4fcaa2f5abeedc98093b6cb13638991725cab74',
-  'arm64-2.333.1': '69ac7e5692f877189e7dddf4a1bb16cbbd6425568cd69a0359895fac48b9ad3b',
+  // v2.335.1 — pinned default as of 2026-06-17. Bumped from 2.333.1, which
+  // GitHub stops allowing to run jobs on 2026-06-23.
+  'x64-2.335.1':   '4ef2f25285f0ae4477f1fe1e346db76d2f3ebf03824e2ddd1973a2819bf6c8cf',
+  'arm64-2.335.1': '6d1e85bfd1a506a8b17c1f1b9b57dba458ffed90898799aaa9f599520b0d9207',
 };
 
 function lookup(arch, version) {
