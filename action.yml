@@ -78,7 +78,7 @@ inputs:
       tarball's SHA-256 against that table before extraction). To
       override, add the corresponding hash to the table in a PR.
     required: false
-    default: '2.333.1'
+    default: '2.335.1'
   encrypt-ebs:
     description: >-
       When 'true', the root EBS volume is created with SSE-EBS

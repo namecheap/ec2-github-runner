@@ -132,9 +132,9 @@ describe('Config — mode validation', () => {
 });
 
 describe('Config — runner-version input', () => {
-  test('defaults to 2.333.1 when unset', () => {
+  test('defaults to 2.335.1 when unset', () => {
     const config = loadConfig(startModeInputs);
-    expect(config.input.runnerVersion).toBe('2.333.1');
+    expect(config.input.runnerVersion).toBe('2.335.1');
   });
 
   test('honors an explicit override', () => {

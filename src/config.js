@@ -16,7 +16,7 @@ class Config {
       label: core.getInput('label'),
       ec2InstanceId: core.getInput('ec2-instance-id'),
       iamRoleName: core.getInput('iam-role-name'),
-      runnerVersion: core.getInput('runner-version') || '2.333.1',
+      runnerVersion: core.getInput('runner-version') || '2.335.1',
       httpTokens: core.getInput('http-tokens') || 'required',
       encryptEbs: core.getInput('encrypt-ebs') || 'false',
       debug: core.getInput('debug') || 'false',
