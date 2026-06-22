@@ -24,11 +24,11 @@
   "dependencies": {
     "@actions/core": "^2.0.3",
     "@actions/github": "^8.0.1",
-    "@aws-sdk/client-ec2": "3.1064.0"
+    "@aws-sdk/client-ec2": "3.1073.0"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@vercel/ncc": "0.38.4",
+    "@vercel/ncc": "0.44.0",
     "dotenv": "^17.4.2",
     "eslint": "^10.4.1",
     "globals": "^17.6.0",
