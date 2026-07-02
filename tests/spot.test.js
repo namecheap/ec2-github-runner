@@ -49,21 +49,21 @@ describe('buildMarketPlan', () => {
 
 describe('launchAcrossMarkets', () => {
   test('returns the spot placement when spot succeeds (no on-demand attempt)', async () => {
-    const attemptFor = jest.fn((market) => jest.fn().mockResolvedValue(`i-${market}`));
+    const attemptFor = jest.fn((market) => jest.fn().mockResolvedValue([`i-${market}`]));
     const result = await launchAcrossMarkets(attemptFor, ['spot', 'on-demand'], ['t1'], ['s1']);
-    expect(result).toMatchObject({ instanceId: 'i-spot', marketType: 'spot' });
+    expect(result).toMatchObject({ instanceIds: ['i-spot'], marketType: 'spot' });
     expect(attemptFor).toHaveBeenCalledTimes(1); // on-demand attempt fn never built
   });
 
   test('falls back to on-demand exactly once when spot capacity is exhausted', async () => {
     const spotAttempt = jest.fn().mockRejectedValue(capacity());
-    const onDemandAttempt = jest.fn().mockResolvedValue('i-od');
+    const onDemandAttempt = jest.fn().mockResolvedValue(['i-od']);
     const attemptFor = (market) => (market === 'spot' ? spotAttempt : onDemandAttempt);
     const onDowngrade = jest.fn();
 
     const result = await launchAcrossMarkets(attemptFor, ['spot', 'on-demand'], ['t1'], ['s1'], { onDowngrade });
 
-    expect(result).toMatchObject({ instanceId: 'i-od', marketType: 'on-demand' });
+    expect(result).toMatchObject({ instanceIds: ['i-od'], marketType: 'on-demand' });
     expect(spotAttempt).toHaveBeenCalledTimes(1);
     expect(onDemandAttempt).toHaveBeenCalledTimes(1);
     expect(onDowngrade).toHaveBeenCalledWith('spot', 'on-demand', expect.anything());
@@ -71,7 +71,7 @@ describe('launchAcrossMarkets', () => {
 
   test('falls back on SpotMaxPriceTooLow (price is a capacity-class code)', async () => {
     const spotAttempt = jest.fn().mockRejectedValue(err('SpotMaxPriceTooLow'));
-    const onDemandAttempt = jest.fn().mockResolvedValue('i-od');
+    const onDemandAttempt = jest.fn().mockResolvedValue(['i-od']);
     const attemptFor = (market) => (market === 'spot' ? spotAttempt : onDemandAttempt);
     const result = await launchAcrossMarkets(attemptFor, ['spot', 'on-demand'], ['t1'], ['s1']);
     expect(result.marketType).toBe('on-demand');

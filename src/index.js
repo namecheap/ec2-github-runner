@@ -28,17 +28,21 @@ const core = require('@actions/core');
 // command; GitHub runners now surface that as a warning. Bypass the
 // legacy path — modern runners always set GITHUB_OUTPUT.
 function setOutput(label, placement) {
-  const { instanceId, instanceType, subnetId, marketType } = placement;
+  const { instanceIds, instanceType, subnetId, marketType } = placement;
+  // Compat scalar: the first instance id. Batch consumers use the JSON array.
+  const firstId = instanceIds[0];
+  const idsJson = JSON.stringify(instanceIds);
   const outputFile = process.env.GITHUB_OUTPUT;
   if (outputFile) {
     fs.appendFileSync(
       outputFile,
-      `label=${label}${os.EOL}ec2-instance-id=${instanceId}${os.EOL}instance-type-used=${instanceType}${os.EOL}subnet-id-used=${subnetId}${os.EOL}market-type-used=${marketType}${os.EOL}`,
+      `label=${label}${os.EOL}ec2-instance-id=${firstId}${os.EOL}ec2-instance-ids=${idsJson}${os.EOL}instance-type-used=${instanceType}${os.EOL}subnet-id-used=${subnetId}${os.EOL}market-type-used=${marketType}${os.EOL}`,
     );
     return;
   }
   core.setOutput('label', label);
-  core.setOutput('ec2-instance-id', instanceId);
+  core.setOutput('ec2-instance-id', firstId);
+  core.setOutput('ec2-instance-ids', idsJson);
   core.setOutput('instance-type-used', instanceType);
   core.setOutput('subnet-id-used', subnetId);
   core.setOutput('market-type-used', marketType);
@@ -51,25 +55,27 @@ async function start() {
     const label = config.generateUniqueLabel();
     const githubRegistrationToken = await gh.getRegistrationToken();
     const placement = await aws.startEc2Instance(label, githubRegistrationToken);
-    const ec2InstanceId = placement.instanceId;
+    const instanceIds = placement.instanceIds;
     setOutput(label, placement);
-    await aws.waitForInstanceRunning(ec2InstanceId);
+    for (const id of instanceIds) {
+      await aws.waitForInstanceRunning(id);
+    }
 
-    // Watch the bootstrap phone-home tag and GitHub registration together.
-    // On a bootstrap failure or registration timeout, capture the console
-    // output and (by default) terminate the instance so failed starts
-    // don't leak billing. The registration token is redacted from the
-    // captured output.
+    // Watch the bootstrap phone-home tags and GitHub registration together.
+    // The batch is ready only when ALL N runners are online; a bootstrap
+    // failure on ANY instance fails fast. On failure or timeout, capture the
+    // console output of every instance and (by default) terminate them all —
+    // no half-fleet is left leaking billing. The token is redacted.
     try {
       await waitForRunnerReady({
-        getBootstrapStatus: () => aws.getBootstrapStatus(ec2InstanceId),
-        isRunnerOnline: () => gh.isRunnerOnline(label),
+        getBootstrapStatus: () => aws.getBatchBootstrapStatus(instanceIds),
+        isRunnerOnline: async () => (await gh.countOnlineRunners(label)) >= instanceIds.length,
       });
     } catch (waitError) {
-      await aws.handleStartFailure(ec2InstanceId, { redactValues: [githubRegistrationToken] });
+      await aws.handleStartFailure(instanceIds, { redactValues: [githubRegistrationToken] });
       throw waitError;
     }
-    log.info('start', { label, instance_id: ec2InstanceId, instance_type: placement.instanceType, subnet_id: placement.subnetId, outcome: 'registered' });
+    log.info('start', { label, instance_ids: instanceIds, instance_type: placement.instanceType, subnet_id: placement.subnetId, outcome: 'registered' });
   } finally {
     core.endGroup();
   }
@@ -81,17 +87,32 @@ async function stop() {
   try {
     log.debug('stop_inputs', config.input);
 
-    // Attempt both cleanups independently — neither should short-circuit
-    // the other. A GitHub API failure must not prevent EC2 termination
-    // (billing) and vice versa. Both have internal retries via
-    // withRetry(); catch here is the last line of defense.
-    try {
-      await aws.terminateEc2Instance();
-    } catch (error) {
-      failures.push({ step: 'terminate_instance', error: error.name, message: error.message });
+    // Terminate every instance from the batch (the JSON array), or the single
+    // compat scalar. Independent per instance — one failure doesn't stop the
+    // rest — and idempotent: an already-gone instance is not a failure.
+    const instanceIds = (config.input.ec2InstanceIds && config.input.ec2InstanceIds.length)
+      ? config.input.ec2InstanceIds
+      : [config.input.ec2InstanceId];
+
+    for (const id of instanceIds) {
+      try {
+        await aws.terminateInstanceById(id);
+      } catch (error) {
+        if (error.name && error.name.includes('NotFound')) {
+          log.info('terminate_instance', { instance_id: id, skipped: true, reason: 'already_gone' });
+        } else {
+          failures.push({ step: `terminate_instance:${id}`, error: error.name, message: error.message });
+        }
+      }
     }
+
+    // Deregister ALL runners sharing the label (a batch registers N). A
+    // GitHub failure must not have prevented the terminations above.
     try {
-      await gh.removeRunner();
+      const result = await gh.removeAllRunners(config.input.label);
+      for (const f of result.failures) {
+        failures.push({ step: `remove_runner:${f.runnerId}`, message: f.message });
+      }
     } catch (error) {
       failures.push({ step: 'remove_runner', error: error.name, message: error.message });
     }
@@ -101,7 +122,7 @@ async function stop() {
       const summary = failures.map((f) => `${f.step}: ${f.message}`).join('; ');
       throw new Error(`stop mode completed with ${failures.length} cleanup failure(s): ${summary}`);
     }
-    log.info('stop', { instance_id: config.input.ec2InstanceId, label: config.input.label, outcome: 'ok' });
+    log.info('stop', { instance_ids: instanceIds, label: config.input.label, outcome: 'ok' });
   } finally {
     core.endGroup();
   }

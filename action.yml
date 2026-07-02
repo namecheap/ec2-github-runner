@@ -60,11 +60,33 @@ inputs:
       The runner doesn't require any inbound traffic. However, outbound traffic should be allowed.
       This input is required if you use the 'start' mode.
     required: false
+  count:
+    description: >-
+      Used only with the 'start' mode. Number of runner instances to launch
+      behind the single shared label (default 1). GitHub distributes matrix
+      jobs across runners sharing a label. One RunInstances call launches all
+      N; by default it is all-or-nothing (see allow-partial).
+    required: false
+    default: '1'
+  allow-partial:
+    description: >-
+      Used only with the 'start' mode with count > 1. When 'false' (default)
+      the batch is all-or-nothing (MinCount = count). When 'true', as few as
+      1 instance may launch; the realized set is reported in the
+      'ec2-instance-ids' output and a warning is logged.
+    required: false
+    default: 'false'
   label:
     description: >-
       Name of the unique label assigned to the runner.
       The label is used to remove the runner from GitHub when the runner is not needed anymore.
       This input is required if you use the 'stop' mode.
+    required: false
+  ec2-instance-ids:
+    description: >-
+      JSON array of EC2 instance ids to terminate, as emitted by a batched
+      'start' (the 'ec2-instance-ids' output). Used with the 'stop' mode;
+      either this or 'ec2-instance-id' is required to stop.
     required: false
   ec2-instance-id:
     description: >-
@@ -229,6 +251,12 @@ outputs:
     description: >-
       EC2 Instance Id of the created runner.
       The id is used to terminate the EC2 instance when the runner is not needed anymore.
+  ec2-instance-ids:
+    description: >-
+      JSON array of all EC2 instance ids launched by a batched 'start'
+      (e.g. '["i-aaa","i-bbb"]'). For count=1 this is a single-element array;
+      'ec2-instance-id' remains the first id for compatibility. Pass this to
+      the 'stop' mode to terminate the whole batch.
   instance-type-used:
     description: >-
       The EC2 instance type that was actually launched (start mode). With a
