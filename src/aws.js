@@ -97,11 +97,42 @@ async function resolveImage(client) {
   return { id: picked.ImageId, image: picked };
 }
 
-// Build BlockDeviceMappings that encrypt the AMI's root volume without
-// changing its size, type, or iops. Returns null when no root mapping
-// is present on the image (exotic AMIs) — caller should skip encryption
-// and log a warning rather than ship a broken RunInstances call.
-function buildEncryptedRootMapping(image) {
+// True when the launch needs a custom root BlockDeviceMapping — i.e. the
+// user opted into encryption or any root-volume override. When false the
+// caller omits BlockDeviceMappings entirely, so the instance inherits the
+// AMI's block device mapping byte-for-byte (zero-diff vs. the default).
+function wantsRootDeviceMapping(input) {
+  return input.encryptEbs === 'true'
+    || !!input.volumeSize
+    || !!input.volumeType
+    || !!input.volumeIops
+    || !!input.volumeThroughput;
+}
+
+// Normalize the root-volume-related config inputs (strings) into a typed
+// options object for buildRootDeviceMapping. Omitted inputs become
+// undefined so the builder leaves the AMI default untouched.
+function buildVolumeOpts(input) {
+  return {
+    encrypt: input.encryptEbs === 'true',
+    volumeSize: input.volumeSize ? Number(input.volumeSize) : undefined,
+    volumeType: input.volumeType || undefined,
+    volumeIops: input.volumeIops ? Number(input.volumeIops) : undefined,
+    volumeThroughput: input.volumeThroughput ? Number(input.volumeThroughput) : undefined,
+  };
+}
+
+// Build BlockDeviceMappings for the AMI's root volume, composing
+// encryption (encrypt-ebs) and sizing (volume-size/type/iops/throughput)
+// into a single mapping — one writer, not two competing ones. Clones the
+// AMI's root Ebs config, drops SnapshotId (AWS uses the AMI's snapshot
+// automatically), and applies only the requested overrides so omitted
+// inputs keep AMI defaults. DeleteOnTermination is always forced true —
+// ephemeral runners must never leak their root volume. Returns null when
+// the AMI has no root EBS mapping (exotic AMIs); the caller logs a warning
+// rather than shipping a broken RunInstances call. Throws when the
+// requested size is smaller than the AMI snapshot (invalid, fail fast).
+function buildRootDeviceMapping(image, opts = {}) {
   const rootDev = image.RootDeviceName;
   if (!rootDev || !Array.isArray(image.BlockDeviceMappings)) {
     return null;
@@ -110,15 +141,35 @@ function buildEncryptedRootMapping(image) {
   if (!rootMap || !rootMap.Ebs) {
     return null;
   }
-  // Clone the EBS config and set Encrypted: true. Drop SnapshotId — AWS
-  // will use the AMI's snapshot automatically and re-encrypt during
-  // launch under the account's default EBS key.
-  const ebsClone = { ...rootMap.Ebs };
-  delete ebsClone.SnapshotId;
-  return [{
-    DeviceName: rootDev,
-    Ebs: { ...ebsClone, Encrypted: true },
-  }];
+
+  const ebs = { ...rootMap.Ebs };
+  const snapshotSize = ebs.VolumeSize;
+  delete ebs.SnapshotId;
+  ebs.DeleteOnTermination = true;
+
+  if (opts.encrypt) {
+    ebs.Encrypted = true;
+  }
+  if (opts.volumeSize != null) {
+    if (snapshotSize != null && opts.volumeSize < snapshotSize) {
+      throw new Error(
+        `volume-size ${opts.volumeSize} GiB is smaller than the AMI snapshot size ${snapshotSize} GiB; ` +
+        'an EBS volume cannot be smaller than the snapshot it is created from.',
+      );
+    }
+    ebs.VolumeSize = opts.volumeSize;
+  }
+  if (opts.volumeType) {
+    ebs.VolumeType = opts.volumeType;
+  }
+  if (opts.volumeIops != null) {
+    ebs.Iops = opts.volumeIops;
+  }
+  if (opts.volumeThroughput != null) {
+    ebs.Throughput = opts.volumeThroughput;
+  }
+
+  return [{ DeviceName: rootDev, Ebs: ebs }];
 }
 
 // Build the cloud-init user-data bootstrap script.
@@ -335,15 +386,21 @@ async function startEc2Instance(label, githubRegistrationToken) {
     params.InstanceInitiatedShutdownBehavior = 'terminate';
   }
 
-  if (config.input.encryptEbs === 'true') {
-    const mappings = buildEncryptedRootMapping(resolved.image);
+  if (wantsRootDeviceMapping(config.input)) {
+    const mappings = buildRootDeviceMapping(resolved.image, buildVolumeOpts(config.input));
     if (mappings) {
       params.BlockDeviceMappings = mappings;
-      log.info('encrypt_ebs', { applied: true, root_device: mappings[0].DeviceName });
+      log.info('root_volume', {
+        applied: true,
+        root_device: mappings[0].DeviceName,
+        encrypted: mappings[0].Ebs.Encrypted === true,
+        volume_size: mappings[0].Ebs.VolumeSize,
+        volume_type: mappings[0].Ebs.VolumeType,
+      });
     } else {
-      log.warn('encrypt_ebs', {
+      log.warn('root_volume', {
         applied: false,
-        reason: 'ami has no root EBS block-device mapping — skipping encryption override',
+        reason: 'ami has no root EBS block-device mapping — skipping encryption/sizing override',
         ami_id: resolved.id,
       });
     }
@@ -562,7 +619,9 @@ module.exports = {
   handleStartFailure,
   listManagedInstances,
   // Exported for unit testing.
-  buildEncryptedRootMapping,
+  buildRootDeviceMapping,
+  wantsRootDeviceMapping,
+  buildVolumeOpts,
   buildUserData,
   buildTagSpecifications,
   redactSecrets,

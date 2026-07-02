@@ -152,6 +152,46 @@ describe('Config — cleanup mode', () => {
   });
 });
 
+describe('Config — root volume inputs', () => {
+  test('accepts a valid gp3 sizing combination', () => {
+    const config = loadConfig({ ...startModeInputs, 'volume-size': '100', 'volume-type': 'gp3', 'volume-iops': '4000', 'volume-throughput': '250' });
+    expect(config.input.volumeSize).toBe('100');
+    expect(config.input.volumeType).toBe('gp3');
+    expect(config.input.volumeIops).toBe('4000');
+    expect(config.input.volumeThroughput).toBe('250');
+  });
+
+  test('no volume inputs is valid (AMI defaults)', () => {
+    const config = loadConfig(startModeInputs);
+    expect(config.input.volumeSize).toBe('');
+  });
+
+  test('rejects a non-numeric volume-size', () => {
+    expectValidationFailure({ ...startModeInputs, 'volume-size': 'big' }, /'volume-size' must be a positive integer/);
+  });
+
+  test('rejects a zero / negative volume-size', () => {
+    expectValidationFailure({ ...startModeInputs, 'volume-size': '0' }, /'volume-size' must be a positive integer/);
+  });
+
+  test('rejects an unknown volume-type', () => {
+    expectValidationFailure({ ...startModeInputs, 'volume-type': 'gp4' }, /'volume-type' must be one of/);
+  });
+
+  test('rejects volume-iops with an incompatible type', () => {
+    expectValidationFailure({ ...startModeInputs, 'volume-type': 'gp2', 'volume-iops': '4000' }, /'volume-iops' is only valid/);
+  });
+
+  test('rejects volume-throughput with a non-gp3 type', () => {
+    expectValidationFailure({ ...startModeInputs, 'volume-type': 'io2', 'volume-iops': '4000', 'volume-throughput': '250' }, /'volume-throughput' is only valid with 'volume-type' gp3/);
+  });
+
+  test('accepts iops with io2', () => {
+    const config = loadConfig({ ...startModeInputs, 'volume-type': 'io2', 'volume-iops': '5000' });
+    expect(config.input.volumeIops).toBe('5000');
+  });
+});
+
 describe('Config — max-lifetime-minutes input', () => {
   test('defaults to 360 when unset', () => {
     const config = loadConfig(startModeInputs);

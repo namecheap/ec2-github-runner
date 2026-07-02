@@ -19,6 +19,10 @@ class Config {
       runnerVersion: core.getInput('runner-version') || '2.335.1',
       httpTokens: core.getInput('http-tokens') || 'required',
       encryptEbs: core.getInput('encrypt-ebs') || 'false',
+      volumeSize: core.getInput('volume-size'),
+      volumeType: core.getInput('volume-type'),
+      volumeIops: core.getInput('volume-iops'),
+      volumeThroughput: core.getInput('volume-throughput'),
       cleanupOnStartFailure: core.getInput('cleanup-on-start-failure') || 'true',
       maxLifetimeMinutes: core.getInput('max-lifetime-minutes') || '360',
       maxAgeMinutes: core.getInput('max-age-minutes') || '120',
@@ -59,6 +63,7 @@ class Config {
       if (!this.input.ec2ImageId && !this.input.ec2ImageFilters) {
         throw new Error(`Not all the required inputs for AMI search are provided for the 'start' mode`);
       }
+      this.validateVolumeInputs();
     } else if (this.input.mode === 'stop') {
       if (!this.input.label || !this.input.ec2InstanceId) {
         throw new Error(`Not all the required inputs are provided for the 'stop' mode`);
@@ -69,6 +74,35 @@ class Config {
       // have safe defaults.
     } else {
       throw new Error('Wrong mode. Allowed values: start, stop, cleanup.');
+    }
+  }
+
+  // Validate the root-volume inputs against EBS rules that don't need the
+  // AMI (fail in seconds at config parse). The size-vs-snapshot check needs
+  // the DescribeImages data and lives in src/aws.js buildRootDeviceMapping.
+  validateVolumeInputs() {
+    const { volumeSize, volumeType, volumeIops, volumeThroughput } = this.input;
+    const ALLOWED_TYPES = ['gp3', 'gp2', 'io1', 'io2'];
+    const IOPS_TYPES = ['gp3', 'io1', 'io2'];
+    const isPositiveInt = (v) => /^[0-9]+$/.test(v) && Number(v) > 0;
+
+    if (volumeSize && !isPositiveInt(volumeSize)) {
+      throw new Error(`'volume-size' must be a positive integer (GiB)`);
+    }
+    if (volumeIops && !isPositiveInt(volumeIops)) {
+      throw new Error(`'volume-iops' must be a positive integer`);
+    }
+    if (volumeThroughput && !isPositiveInt(volumeThroughput)) {
+      throw new Error(`'volume-throughput' must be a positive integer (MiB/s)`);
+    }
+    if (volumeType && !ALLOWED_TYPES.includes(volumeType)) {
+      throw new Error(`'volume-type' must be one of: ${ALLOWED_TYPES.join(', ')}`);
+    }
+    if (volumeIops && !IOPS_TYPES.includes(volumeType)) {
+      throw new Error(`'volume-iops' is only valid with 'volume-type' one of: ${IOPS_TYPES.join(', ')}`);
+    }
+    if (volumeThroughput && volumeType !== 'gp3') {
+      throw new Error(`'volume-throughput' is only valid with 'volume-type' gp3`);
     }
   }
 
