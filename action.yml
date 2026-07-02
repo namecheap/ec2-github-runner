@@ -118,6 +118,26 @@ inputs:
       change is needed to run on Graviton.
     required: false
     default: 'x64'
+  pre-runner-script:
+    description: >-
+      Used only with the 'start' mode. A shell snippet run as root by the
+      built-in bootstrap BEFORE runner configuration (e.g. install docker,
+      mount caches, add corporate certs). Runs under set -euo pipefail; a
+      failure is tagged 'failed:pre-runner-script'. Mutually exclusive with
+      user-data-template.
+    required: false
+  user-data-template:
+    description: >-
+      Used only with the 'start' mode. Full user-data bootstrap override —
+      a repo-relative file path or an inline template string. The action
+      substitutes the documented placeholders ({{RUNNER_VERSION}},
+      {{RUNNER_CHECKSUM_X64}}, {{RUNNER_CHECKSUM_ARM64}},
+      {{REGISTRATION_TOKEN}}, {{REPO_URL}}, {{LABEL}}, {{TTL_MINUTES}}) and
+      submits the result as-is. The template MUST register the runner.
+      Custom templates are unsupported (the built-in bootstrap is the
+      supported path); see examples/user-data/. Mutually exclusive with
+      pre-runner-script.
+    required: false
   encrypt-ebs:
     description: >-
       When 'true', the root EBS volume is created with SSE-EBS

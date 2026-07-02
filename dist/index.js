@@ -104659,11 +104659,13 @@ const {
   AssociateAddressCommand,
   waitUntilInstanceRunning,
 } = __nccwpck_require__(5193);
+const fs = __nccwpck_require__(9896);
 const core = __nccwpck_require__(7484);
 const config = __nccwpck_require__(1283);
 const log = __nccwpck_require__(7223);
 const { withRetry } = __nccwpck_require__(6759);
 const { sortByCreationDate, parseCsv } = __nccwpck_require__(5804);
+const { renderUserDataTemplate, assertUserDataSize } = __nccwpck_require__(9275);
 const checksums = __nccwpck_require__(2874);
 
 // RunInstances error classification for the capacity-fallback chain.
@@ -104994,7 +104996,21 @@ function buildRootDeviceMapping(image, opts = {}) {
 //   registration timeout. Tagging is best-effort: it needs
 //   `ec2:CreateTags` on the instance profile and degrades to
 //   timeout-only detection when absent (every write is `|| true`).
-function buildUserData({ runnerVersion, owner, repo, label, githubRegistrationToken, shaX64, shaArm64, maxLifetimeMinutes }) {
+function buildUserData({ runnerVersion, owner, repo, label, githubRegistrationToken, shaX64, shaArm64, maxLifetimeMinutes, preRunnerScript }) {
+  // User-supplied pre-runner-script (#46): injected verbatim into the outer
+  // (root) shell before runner configuration, under the same set -euo
+  // pipefail + ERR trap, tagged as its own phase so a failure surfaces as
+  // failed:pre-runner-script.
+  const preRunnerLines = preRunnerScript && preRunnerScript.trim()
+    ? [
+      '# User-supplied pre-runner-script (runs as root before runner config).',
+      'GH_RUNNER_STEP=pre-runner-script',
+      'gh_runner_phone_home pre-runner-script',
+      ...preRunnerScript.replace(/\r\n/g, '\n').split('\n'),
+      '',
+    ]
+    : [];
+
   // TTL self-destruct (#42): arm a shutdown timer as an absolute upper
   // bound on instance lifetime. Combined with
   // InstanceInitiatedShutdownBehavior: terminate on RunInstances (set in
@@ -105053,6 +105069,7 @@ function buildUserData({ runnerVersion, owner, repo, label, githubRegistrationTo
     '  useradd -m -s /bin/bash runner',
     'fi',
     '',
+    ...preRunnerLines,
     '# The runner-user shell owns the download/configure/register phases and',
     '# reports them itself; drop the outer ERR trap so it does not overwrite',
     '# the inner shell\'s more specific failed:<step> tag.',
@@ -105127,6 +105144,15 @@ function buildTagSpecifications(label, startedAtIso) {
   ];
 }
 
+// Resolve the user-data-template input: a repo-relative path is read from
+// disk; anything else is treated as an inline template string.
+function resolveUserDataTemplate(templateInput) {
+  if (fs.existsSync(templateInput)) {
+    return fs.readFileSync(templateInput, 'utf8');
+  }
+  return templateInput;
+}
+
 async function startEc2Instance(label, githubRegistrationToken) {
   const client = ec2Client();
 
@@ -105144,7 +105170,30 @@ async function startEc2Instance(label, githubRegistrationToken) {
   }
 
   const maxLifetimeMinutes = config.input.maxLifetimeMinutes;
-  const userData = buildUserData({ runnerVersion, owner, repo, label, githubRegistrationToken, shaX64, shaArm64, maxLifetimeMinutes });
+
+  // Bootstrap source (#46): a full user-data-template override renders the
+  // documented placeholders; otherwise the built-in yum bootstrap is used,
+  // optionally with an injected pre-runner-script. Either way the rendered
+  // payload is size-checked against the EC2 16 KB limit.
+  let userData;
+  if (config.input.userDataTemplate) {
+    const template = resolveUserDataTemplate(config.input.userDataTemplate);
+    userData = renderUserDataTemplate(template, {
+      RUNNER_VERSION: runnerVersion,
+      RUNNER_CHECKSUM_X64: shaX64,
+      RUNNER_CHECKSUM_ARM64: shaArm64,
+      REGISTRATION_TOKEN: githubRegistrationToken,
+      REPO_URL: `https://github.com/${owner}/${repo}`,
+      LABEL: label,
+      TTL_MINUTES: maxLifetimeMinutes,
+    });
+  } else {
+    userData = buildUserData({
+      runnerVersion, owner, repo, label, githubRegistrationToken, shaX64, shaArm64, maxLifetimeMinutes,
+      preRunnerScript: config.input.preRunnerScript,
+    });
+  }
+  assertUserDataSize(userData);
 
   const resolved = await resolveImage(client);
   config.input.ec2ImageId = resolved.id;
@@ -105682,6 +105731,8 @@ class Config {
       ec2InstanceIds: core.getInput('ec2-instance-ids') ? JSON.parse(core.getInput('ec2-instance-ids')) : null,
       count: core.getInput('count') || '1',
       allowPartial: core.getInput('allow-partial') || 'false',
+      preRunnerScript: core.getInput('pre-runner-script'),
+      userDataTemplate: core.getInput('user-data-template'),
       iamRoleName: core.getInput('iam-role-name'),
       runnerVersion: core.getInput('runner-version') || '2.335.1',
       architecture: core.getInput('architecture') || 'x64',
@@ -105735,6 +105786,7 @@ class Config {
       this.validateMarketInputs();
       this.validateArchitectureInputs();
       this.validateCountInput();
+      this.validateBootstrapInputs();
     } else if (this.input.mode === 'stop') {
       // A stop needs the shared label plus at least one instance id — either
       // the compat scalar or the JSON array from a batched start.
@@ -105810,6 +105862,14 @@ class Config {
     }
     if (types.length > 0 && !arches.includes(arch)) {
       throw new Error(`'ec2-instance-type' (${types.join(', ')}) looks like ${arches[0]} but 'architecture' is '${arch}'`);
+    }
+  }
+
+  // The two bootstrap-extension inputs are mutually exclusive: pre-runner-
+  // script augments the built-in bootstrap, user-data-template replaces it.
+  validateBootstrapInputs() {
+    if (this.input.userDataTemplate && this.input.preRunnerScript) {
+      throw new Error(`'user-data-template' and 'pre-runner-script' are mutually exclusive`);
     }
   }
 
@@ -106156,6 +106216,71 @@ function lookup(arch, version) {
 module.exports = {
   CHECKSUMS,
   lookup,
+};
+
+
+/***/ }),
+
+/***/ 9275:
+/***/ ((module) => {
+
+// User-data template rendering for the `user-data-template` input (full
+// bootstrap override). The action renders a fixed set of placeholders and
+// submits the result verbatim; the script itself is the user's business.
+// Pure functions — no I/O — so rendering and validation are unit-testable.
+
+// EC2 caps user-data at 16 KB (raw, before base64). Guard against it up
+// front with a clear error rather than a cryptic RunInstances rejection.
+const MAX_USER_DATA_BYTES = 16 * 1024;
+
+// The documented placeholders a template may reference.
+const PLACEHOLDERS = [
+  'RUNNER_VERSION',
+  'RUNNER_CHECKSUM_X64',
+  'RUNNER_CHECKSUM_ARM64',
+  'REGISTRATION_TOKEN',
+  'REPO_URL',
+  'LABEL',
+  'TTL_MINUTES',
+];
+
+// Substitute every documented {{PLACEHOLDER}} with its value, then fail if
+// any unknown {{TOKEN}} remains (catches typos before boot). Unused known
+// placeholders are fine.
+function renderUserDataTemplate(template, vars) {
+  let out = template;
+  for (const key of PLACEHOLDERS) {
+    const value = vars[key] != null ? String(vars[key]) : '';
+    out = out.split(`{{${key}}}`).join(value);
+  }
+  const unknown = [...out.matchAll(/\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g)].map((m) => m[1]);
+  if (unknown.length > 0) {
+    const uniq = [...new Set(unknown)];
+    throw new Error(
+      `Unknown placeholder(s) in user-data-template: ${uniq.join(', ')}. ` +
+      `Supported placeholders: ${PLACEHOLDERS.join(', ')}`,
+    );
+  }
+  return out;
+}
+
+// Throw if the rendered user-data exceeds the EC2 16 KB limit.
+function assertUserDataSize(userData) {
+  const bytes = Buffer.byteLength(userData, 'utf8');
+  if (bytes > MAX_USER_DATA_BYTES) {
+    throw new Error(
+      `Rendered user-data is ${bytes} bytes, over the EC2 limit of ${MAX_USER_DATA_BYTES} bytes. ` +
+      'Trim the pre-runner-script / user-data-template (fetch large payloads at runtime instead).',
+    );
+  }
+  return userData;
+}
+
+module.exports = {
+  renderUserDataTemplate,
+  assertUserDataSize,
+  MAX_USER_DATA_BYTES,
+  PLACEHOLDERS,
 };
 
 

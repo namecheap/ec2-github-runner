@@ -238,6 +238,25 @@ describe('Config — stop mode with instance batch', () => {
   });
 });
 
+describe('Config — bootstrap extension inputs', () => {
+  test('accepts a pre-runner-script alone', () => {
+    const config = loadConfig({ ...startModeInputs, 'pre-runner-script': 'yum install -y docker' });
+    expect(config.input.preRunnerScript).toBe('yum install -y docker');
+  });
+
+  test('accepts a user-data-template alone', () => {
+    const config = loadConfig({ ...startModeInputs, 'user-data-template': './ci/boot.sh.tpl' });
+    expect(config.input.userDataTemplate).toBe('./ci/boot.sh.tpl');
+  });
+
+  test('rejects setting both (mutually exclusive)', () => {
+    expectValidationFailure(
+      { ...startModeInputs, 'pre-runner-script': 'echo hi', 'user-data-template': './boot.tpl' },
+      /mutually exclusive/,
+    );
+  });
+});
+
 describe('Config — architecture input', () => {
   test('defaults to x64', () => {
     expect(loadConfig(startModeInputs).input.architecture).toBe('x64');
