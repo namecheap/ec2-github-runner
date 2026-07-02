@@ -77,8 +77,8 @@ async function launchWithFallback(attempt, instanceTypes, subnetIds) {
   for (const instanceType of instanceTypes) {
     for (const subnetId of subnetIds) {
       try {
-        const instanceId = await attempt(instanceType, subnetId);
-        return { instanceId, instanceType, subnetId };
+        const instanceIds = await attempt(instanceType, subnetId);
+        return { instanceIds, instanceType, subnetId };
       } catch (error) {
         const kind = classifyRunError(error);
         if (kind === 'capacity') {
@@ -512,12 +512,18 @@ async function startEc2Instance(label, githubRegistrationToken) {
     log.warn('ami_architecture', { applied: false, reason: 'AMI did not report an architecture — skipping arch validation', ami_id: resolved.id });
   }
 
+  // Batch size: MaxCount instances behind one shared label. Default all-or-
+  // nothing (MinCount == MaxCount) for clean matrix capacity semantics;
+  // allow-partial opts into MinCount 1 (realized count reported in outputs).
+  const count = Number(config.input.count);
+  const allowPartial = config.input.allowPartial === 'true';
+
   // InstanceType and SubnetId are injected per attempt by the fallback
   // chain (see below), so they are intentionally absent from the base.
   const params = {
     ImageId: config.input.ec2ImageId,
-    MinCount: 1,
-    MaxCount: 1,
+    MinCount: allowPartial ? 1 : count,
+    MaxCount: count,
     UserData: Buffer.from(userData).toString('base64'),
     SecurityGroupIds: [config.input.securityGroupId],
     IamInstanceProfile: { Name: config.input.iamRoleName },
@@ -589,7 +595,7 @@ async function startEc2Instance(label, githubRegistrationToken) {
       () => client.send(new RunInstancesCommand(attemptParams)),
       { shouldRetry: (error) => classifyRunError(error) === 'transient' },
     );
-    return result.Instances[0].InstanceId;
+    return result.Instances.map((instance) => instance.InstanceId);
   };
 
   const marketPlan = buildMarketPlan(config.input.marketType, config.input.spotFallback);
@@ -607,26 +613,36 @@ async function startEc2Instance(label, githubRegistrationToken) {
     core.error('AWS EC2 instance starting error');
     throw error;
   }
-  const ec2InstanceId = placement.instanceId;
-  log.info('run_instance', { instance_id: ec2InstanceId, instance_type: placement.instanceType, subnet_id: placement.subnetId, market_type: placement.marketType, elapsed_ms: Date.now() - runStart });
-  core.info(`AWS EC2 instance ${ec2InstanceId} is started (type ${placement.instanceType}, subnet ${placement.subnetId}, ${placement.marketType})`);
+  const instanceIds = placement.instanceIds;
+  if (instanceIds.length < count) {
+    log.warn('run_instance', { requested: count, realized: instanceIds.length, allow_partial: allowPartial });
+    core.warning(`Requested ${count} instance(s) but only ${instanceIds.length} launched (allow-partial).`);
+  }
+  log.info('run_instance', { instance_ids: instanceIds, instance_type: placement.instanceType, subnet_id: placement.subnetId, market_type: placement.marketType, elapsed_ms: Date.now() - runStart });
+  core.info(`Started ${instanceIds.length} EC2 instance(s) [${instanceIds.join(', ')}] (type ${placement.instanceType}, subnet ${placement.subnetId}, ${placement.marketType})`);
 
+  // Elastic IP association only makes sense for a single instance — a lone
+  // EIP can't attach to N runners.
   if (config.input.eipAllocationId) {
-    await waitForInstanceRunning(ec2InstanceId);
-
-    try {
-      log.info('associate_address', { allocation_id: config.input.eipAllocationId, instance_id: ec2InstanceId });
-      await client.send(new AssociateAddressCommand({
-        AllocationId: config.input.eipAllocationId,
-        InstanceId: ec2InstanceId,
-      }));
-    } catch (error) {
-      log.warn('associate_address', { allocation_id: config.input.eipAllocationId, instance_id: ec2InstanceId, error: error.name, message: error.message });
-      core.warning(`Elastic IP association error, trying to proceed w/o EIP: ${error.message}`);
+    if (instanceIds.length !== 1) {
+      log.warn('associate_address', { skipped: true, reason: 'eip-allocation-id is ignored for multi-instance batches', count: instanceIds.length });
+      core.warning('eip-allocation-id is ignored when count > 1 (a single EIP cannot attach to multiple instances).');
+    } else {
+      await waitForInstanceRunning(instanceIds[0]);
+      try {
+        log.info('associate_address', { allocation_id: config.input.eipAllocationId, instance_id: instanceIds[0] });
+        await client.send(new AssociateAddressCommand({
+          AllocationId: config.input.eipAllocationId,
+          InstanceId: instanceIds[0],
+        }));
+      } catch (error) {
+        log.warn('associate_address', { allocation_id: config.input.eipAllocationId, instance_id: instanceIds[0], error: error.name, message: error.message });
+        core.warning(`Elastic IP association error, trying to proceed w/o EIP: ${error.message}`);
+      }
     }
   }
 
-  return { instanceId: ec2InstanceId, instanceType: placement.instanceType, subnetId: placement.subnetId, marketType: placement.marketType };
+  return { instanceIds, instanceType: placement.instanceType, subnetId: placement.subnetId, marketType: placement.marketType };
 }
 
 async function terminateInstanceById(ec2InstanceId) {
@@ -639,6 +655,9 @@ async function terminateInstanceById(ec2InstanceId) {
       client.send(new TerminateInstancesCommand({
         InstanceIds: [ec2InstanceId],
       })),
+      // An already-gone instance (InvalidInstanceID.NotFound) is terminal —
+      // don't burn retries; the caller treats it as already-terminated.
+      { shouldRetry: (error) => !(error.name && error.name.includes('NotFound')) },
     );
     log.info('terminate_instance', { instance_id: ec2InstanceId, elapsed_ms: Date.now() - start });
     core.info(`AWS EC2 instance ${ec2InstanceId} is terminated`);
@@ -647,10 +666,6 @@ async function terminateInstanceById(ec2InstanceId) {
     core.error(`AWS EC2 instance ${ec2InstanceId} termination error`);
     throw error;
   }
-}
-
-async function terminateEc2Instance() {
-  return terminateInstanceById(config.input.ec2InstanceId);
 }
 
 // Read the instance's bootstrap phone-home tag. Returns the tag value
@@ -673,6 +688,20 @@ async function getBootstrapStatus(ec2InstanceId) {
     log.debug('bootstrap_status', { instance_id: ec2InstanceId, error: error.name, message: error.message });
     return null;
   }
+}
+
+// For a batch, return the first instance's `failed:<step>` status (so the
+// wait loop can fail fast if ANY instance's bootstrap aborts), or null when
+// none have failed. Makes N-way waits fail as fast as single ones.
+async function getBatchBootstrapStatus(ec2InstanceIds) {
+  for (const id of ec2InstanceIds) {
+    const status = await getBootstrapStatus(id);
+    if (typeof status === 'string' && status.startsWith('failed:')) {
+      log.warn('bootstrap_status', { instance_id: id, status });
+      return status;
+    }
+  }
+  return null;
 }
 
 // Replace every occurrence of each secret value with '***'. Uses literal
@@ -722,31 +751,39 @@ async function getConsoleOutputTail(ec2InstanceId, opts = {}) {
   return redactSecrets(tail, opts.redactValues);
 }
 
-// Handle a failed start: capture and print the instance's console output
-// (collapsible group, secrets redacted), then either terminate the
-// instance (default, so failed starts don't leak billing) or preserve it
-// for interactive debugging when cleanup-on-start-failure is 'false'.
-// Order is capture-then-terminate so the diagnostics survive the cleanup.
-async function handleStartFailure(ec2InstanceId, opts = {}) {
-  const tail = await getConsoleOutputTail(ec2InstanceId, { redactValues: opts.redactValues });
-  core.startGroup(`EC2 instance ${ec2InstanceId} console output (last ${CONSOLE_TAIL_LINES} lines)`);
-  core.info(tail || '(no console output was available yet — the instance may have failed before cloud-init produced output)');
-  core.endGroup();
+// Handle a failed start: for every launched instance, capture and print its
+// console output (collapsible group, secrets redacted), then either
+// terminate all of them (default, so a failed start — including one bad
+// instance in a batch — never leaks billing) or preserve them for
+// interactive debugging when cleanup-on-start-failure is 'false'. Capture
+// happens before termination so the diagnostics survive the cleanup.
+// Accepts a single id or an array (single-instance callers unchanged).
+async function handleStartFailure(ec2InstanceIds, opts = {}) {
+  const ids = Array.isArray(ec2InstanceIds) ? ec2InstanceIds : [ec2InstanceIds];
+
+  for (const id of ids) {
+    const tail = await getConsoleOutputTail(id, { redactValues: opts.redactValues });
+    core.startGroup(`EC2 instance ${id} console output (last ${CONSOLE_TAIL_LINES} lines)`);
+    core.info(tail || '(no console output was available yet — the instance may have failed before cloud-init produced output)');
+    core.endGroup();
+  }
 
   if (config.input.cleanupOnStartFailure === 'true') {
-    log.info('cleanup_on_start_failure', { instance_id: ec2InstanceId, action: 'terminate' });
-    try {
-      await terminateInstanceById(ec2InstanceId);
-    } catch (error) {
-      log.error('cleanup_on_start_failure', { instance_id: ec2InstanceId, error: error.name, message: error.message });
-      core.warning(`Could not terminate failed instance ${ec2InstanceId}: ${error.message}. Terminate it manually to avoid charges.`);
+    for (const id of ids) {
+      log.info('cleanup_on_start_failure', { instance_id: id, action: 'terminate' });
+      try {
+        await terminateInstanceById(id);
+      } catch (error) {
+        log.error('cleanup_on_start_failure', { instance_id: id, error: error.name, message: error.message });
+        core.warning(`Could not terminate failed instance ${id}: ${error.message}. Terminate it manually to avoid charges.`);
+      }
     }
   } else {
-    log.info('cleanup_on_start_failure', { instance_id: ec2InstanceId, action: 'preserve' });
+    log.info('cleanup_on_start_failure', { instance_ids: ids, action: 'preserve' });
     core.warning(
-      `Instance ${ec2InstanceId} was left running for debugging (cleanup-on-start-failure: false).\n` +
-      `Inspect it with:\n  aws ec2 get-console-output --latest --instance-id ${ec2InstanceId}\n` +
-      `Terminate it when done:\n  aws ec2 terminate-instances --instance-ids ${ec2InstanceId}`,
+      `Instance(s) ${ids.join(', ')} left running for debugging (cleanup-on-start-failure: false).\n` +
+      `Inspect with:\n  aws ec2 get-console-output --latest --instance-id <id>\n` +
+      `Terminate when done:\n  aws ec2 terminate-instances --instance-ids ${ids.join(' ')}`,
     );
   }
 }
@@ -795,10 +832,10 @@ async function listManagedInstances(repo) {
 
 module.exports = {
   startEc2Instance,
-  terminateEc2Instance,
   terminateInstanceById,
   waitForInstanceRunning,
   getBootstrapStatus,
+  getBatchBootstrapStatus,
   getConsoleOutputTail,
   handleStartFailure,
   listManagedInstances,

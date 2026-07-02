@@ -19,6 +19,9 @@ class Config {
       eipAllocationId: core.getInput('eip-allocation-id'),
       label: core.getInput('label'),
       ec2InstanceId: core.getInput('ec2-instance-id'),
+      ec2InstanceIds: core.getInput('ec2-instance-ids') ? JSON.parse(core.getInput('ec2-instance-ids')) : null,
+      count: core.getInput('count') || '1',
+      allowPartial: core.getInput('allow-partial') || 'false',
       iamRoleName: core.getInput('iam-role-name'),
       runnerVersion: core.getInput('runner-version') || '2.335.1',
       architecture: core.getInput('architecture') || 'x64',
@@ -71,8 +74,11 @@ class Config {
       this.validateVolumeInputs();
       this.validateMarketInputs();
       this.validateArchitectureInputs();
+      this.validateCountInput();
     } else if (this.input.mode === 'stop') {
-      if (!this.input.label || !this.input.ec2InstanceId) {
+      // A stop needs the shared label plus at least one instance id — either
+      // the compat scalar or the JSON array from a batched start.
+      if (!this.input.label || (!this.input.ec2InstanceId && !(this.input.ec2InstanceIds && this.input.ec2InstanceIds.length))) {
         throw new Error(`Not all the required inputs are provided for the 'stop' mode`);
       }
     } else if (this.input.mode === 'cleanup') {
@@ -144,6 +150,13 @@ class Config {
     }
     if (types.length > 0 && !arches.includes(arch)) {
       throw new Error(`'ec2-instance-type' (${types.join(', ')}) looks like ${arches[0]} but 'architecture' is '${arch}'`);
+    }
+  }
+
+  // Validate the multi-runner batch size.
+  validateCountInput() {
+    if (!(/^[0-9]+$/.test(this.input.count) && Number(this.input.count) >= 1)) {
+      throw new Error(`'count' must be a positive integer`);
     }
   }
 

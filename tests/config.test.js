@@ -192,6 +192,52 @@ describe('Config — root volume inputs', () => {
   });
 });
 
+describe('Config — count / batch inputs', () => {
+  test('defaults count to 1 and allow-partial to false', () => {
+    const config = loadConfig(startModeInputs);
+    expect(config.input.count).toBe('1');
+    expect(config.input.allowPartial).toBe('false');
+  });
+
+  test('accepts count > 1 with allow-partial', () => {
+    const config = loadConfig({ ...startModeInputs, 'count': '4', 'allow-partial': 'true' });
+    expect(config.input.count).toBe('4');
+    expect(config.input.allowPartial).toBe('true');
+  });
+
+  test('rejects a non-integer count', () => {
+    expectValidationFailure({ ...startModeInputs, 'count': 'many' }, /'count' must be a positive integer/);
+  });
+
+  test('rejects count 0', () => {
+    expectValidationFailure({ ...startModeInputs, 'count': '0' }, /'count' must be a positive integer/);
+  });
+});
+
+describe('Config — stop mode with instance batch', () => {
+  const stopBatch = {
+    'mode': 'stop',
+    'github-token': 'ghs_testtoken',
+    'label': 'runner-xyz',
+    'ec2-instance-ids': '["i-aaa","i-bbb"]',
+    'aws-resource-tags': '[]',
+  };
+
+  test('accepts ec2-instance-ids array instead of the scalar', () => {
+    const config = loadConfig(stopBatch);
+    expect(config.input.ec2InstanceIds).toEqual(['i-aaa', 'i-bbb']);
+  });
+
+  test('still accepts the scalar ec2-instance-id (compat)', () => {
+    const config = loadConfig({ ...stopModeInputs });
+    expect(config.input.ec2InstanceId).toBe('i-abc');
+  });
+
+  test('fails when neither ec2-instance-id nor ec2-instance-ids is provided', () => {
+    expectValidationFailure({ 'mode': 'stop', 'github-token': 'ghs_testtoken', 'label': 'l', 'aws-resource-tags': '[]' }, /required inputs are provided for the 'stop' mode/);
+  });
+});
+
 describe('Config — architecture input', () => {
   test('defaults to x64', () => {
     expect(loadConfig(startModeInputs).input.architecture).toBe('x64');

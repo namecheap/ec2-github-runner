@@ -38,9 +38,9 @@ describe('classifyRunError', () => {
 
 describe('launchWithFallback', () => {
   test('returns on the first cell when it succeeds (no fallback)', async () => {
-    const attempt = jest.fn().mockResolvedValue('i-1');
+    const attempt = jest.fn().mockResolvedValue(['i-1']);
     const result = await launchWithFallback(attempt, ['t1', 't2'], ['s1', 's2']);
-    expect(result).toEqual({ instanceId: 'i-1', instanceType: 't1', subnetId: 's1' });
+    expect(result).toEqual({ instanceIds: ['i-1'], instanceType: 't1', subnetId: 's1' });
     expect(attempt).toHaveBeenCalledTimes(1);
   });
 
@@ -48,9 +48,9 @@ describe('launchWithFallback', () => {
     const attempt = jest.fn()
       .mockRejectedValueOnce(capacity()) // t1/s1
       .mockRejectedValueOnce(capacity()) // t1/s2
-      .mockResolvedValueOnce('i-9');     // t2/s1
+      .mockResolvedValueOnce(['i-9']);   // t2/s1
     const result = await launchWithFallback(attempt, ['t1', 't2'], ['s1', 's2']);
-    expect(result).toEqual({ instanceId: 'i-9', instanceType: 't2', subnetId: 's1' });
+    expect(result).toEqual({ instanceIds: ['i-9'], instanceType: 't2', subnetId: 's1' });
     expect(attempt.mock.calls).toEqual([['t1', 's1'], ['t1', 's2'], ['t2', 's1']]);
   });
 

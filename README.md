@@ -314,7 +314,10 @@ Now you're ready to go!
 | `spot-fallback`                                                                                                                                                              | Optional. Used only with `start` + `market-type: spot`. | What to do when spot capacity is unavailable: `on-demand` (default) retries the launch on-demand; `fail` surfaces the error.                                                                                                                                                                                              |
 | `spot-max-price`                                                                                                                                                             | Optional. Used only with `start` + `market-type: spot`. | Max spot price in USD/hour (e.g. `0.05`). Empty (default) caps at the on-demand price.                                                                                                                                                                                                                                    |
 | `label`                                                                                                                                                                      | Required if you use the `stop` mode.       | Name of the unique label assigned to the runner. <br><br> The label is provided by the output of the action in the `start` mode. <br><br> The label is used to remove the runner from GitHub when the runner is not needed anymore.                                                                                                   |
-| `ec2-instance-id`                                                                                                                                                            | Required if you use the `stop` mode.       | EC2 Instance Id of the created runner. <br><br> The id is provided by the output of the action in the `start` mode. <br><br> The id is used to terminate the EC2 instance when the runner is not needed anymore.                                                                                                                      |
+| `count`                                                                                                                                                                      | Optional. Used only with the `start` mode. | Number of runner instances to launch behind the single shared label (default `1`). Enables matrix builds — see [Matrix builds](#matrix-builds-multiple-runners). |
+| `allow-partial`                                                                                                                                                              | Optional. Used only with the `start` mode (`count` > 1). | When `false` (default) the batch is all-or-nothing; when `true`, as few as 1 instance may launch, with the realized set in `ec2-instance-ids` and a warning. |
+| `ec2-instance-id`                                                                                                                                                            | Required for `stop` mode (or `ec2-instance-ids`). | EC2 Instance Id of the created runner. <br><br> The id is provided by the output of the action in the `start` mode. <br><br> The id is used to terminate the EC2 instance when the runner is not needed anymore.                                                                                                              |
+| `ec2-instance-ids`                                                                                                                                                          | Optional. Used with the `stop` mode.       | JSON array of instance ids to terminate, from the `ec2-instance-ids` output of a batched `start` (e.g. `["i-aaa","i-bbb"]`). Either this or `ec2-instance-id` is required to stop.                                                                                                                                                   |
 | `iam-role-name`                                                                                                                                                              | Optional. Used only with the `start` mode. | IAM role name to attach to the created EC2 runner. <br><br> This allows the runner to have permissions to run additional actions within the AWS account, without having to manage additional GitHub secrets and AWS users. <br><br> Setting this requires additional AWS permissions for the role launching the instance (see above). |
 | `aws-resource-tags`                                                                                                                                                          | Optional. Used only with the `start` mode. | Specifies tags to add to the EC2 instance and any attached storage. <br><br> This field is a stringified JSON array of tag objects, each containing a `Key` and `Value` field (see example below). <br><br> Setting this requires additional AWS permissions for the role launching the instance (see above).                         |
 | `eip-allocation-id` | Optional. Used only with the `start` mode. | Allocation Id of an Elastic IP to associate with the runner instance once it is running. |
@@ -348,7 +351,8 @@ We recommend using [aws-actions/configure-aws-credentials](https://github.com/aw
 | &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; | Description                                                                                                                                                                                                                               |
 | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `label`                                                                                                                                                                      | Name of the unique label assigned to the runner. <br><br> The label is used in two cases: <br> - to use as the input of `runs-on` property for the following jobs; <br> - to remove the runner from GitHub when it is not needed anymore. |
-| `ec2-instance-id`                                                                                                                                                            | EC2 Instance Id of the created runner. <br><br> The id is used to terminate the EC2 instance when the runner is not needed anymore.                                                                                                       |
+| `ec2-instance-id`                                                                                                                                                            | EC2 Instance Id of the created runner (the first instance when `count` > 1, kept for compatibility). <br><br> Used to terminate the EC2 instance when the runner is not needed anymore.                                                    |
+| `ec2-instance-ids`                                                                                                                                                           | JSON array of all instance ids launched by `start` (e.g. `["i-aaa","i-bbb"]`; a single-element array when `count` is 1). Pass to the `stop` mode to terminate the whole batch.                                                            |
 | `instance-type-used`                                                                                                                                                         | The EC2 instance type actually launched. With a [capacity-fallback](#capacity-fallback-across-azs-and-instance-types) list this may differ from your first choice.                                                                        |
 | `subnet-id-used`                                                                                                                                                             | The subnet the runner was actually launched into. With a capacity-fallback list this may differ from your first choice.                                                                                                                  |
 | `market-type-used`                                                                                                                                                           | The market the runner launched in: `spot` or `on-demand`. Differs from `market-type` when spot fell back to on-demand.                                                                                                                   |
@@ -425,6 +429,63 @@ jobs:
 In [this discussion](https://github.com/machulav/ec2-github-runner/discussions/19), you can find feedback and examples from the users of the action.
 
 If you use this action in your workflow, feel free to add your story there as well 🙌
+
+## Matrix builds (multiple runners)
+
+Matrix workflows need N runners. Instead of hand-wiring N start/stop jobs, launch a batch with `count` — all N register under the one shared label, and GitHub distributes the matrix jobs across them:
+
+```yml
+jobs:
+  start-runners:
+    runs-on: ubuntu-latest
+    outputs:
+      label: ${{ steps.start.outputs.label }}
+      ids: ${{ steps.start.outputs.ec2-instance-ids }}
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+      - id: start
+        uses: namecheap/ec2-github-runner@v3
+        with:
+          mode: start
+          github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+          ec2-image-id: ami-123
+          ec2-instance-type: c7i.4xlarge
+          subnet-id: subnet-123
+          security-group-id: sg-123
+          count: 4 # launch 4 runners behind one label
+
+  build:
+    needs: start-runners
+    runs-on: ${{ needs.start-runners.outputs.label }} # 4 jobs spread across the 4 runners
+    strategy:
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - run: echo "shard ${{ matrix.shard }}"
+
+  stop-runners:
+    needs: [start-runners, build]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+      - uses: namecheap/ec2-github-runner@v3
+        with:
+          mode: stop
+          github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+          label: ${{ needs.start-runners.outputs.label }}
+          ec2-instance-ids: ${{ needs.start-runners.outputs.ids }}
+```
+
+The whole batch launches in one `RunInstances` call (all-or-nothing by default; `allow-partial: true` opts into a best-effort count). The start waits until **all N** runners register — if any instance fails to bootstrap, the start fails and **all** launched instances are terminated (no half-fleet leaks). `stop` deregisters all N runners and terminates all N instances, reporting per-instance outcomes. The [capacity-fallback](#capacity-fallback-across-azs-and-instance-types) chain retries placement for the whole batch (partial placement across subnets is out of scope).
 
 ## Saving costs with spot
 

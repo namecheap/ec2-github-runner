@@ -91,6 +91,23 @@ describe('getBootstrapStatus', () => {
   });
 });
 
+describe('getBatchBootstrapStatus', () => {
+  const tagsFor = (value) => ({ Tags: value ? [{ Key: aws.BOOTSTRAP_TAG_KEY, Value: value }] : [] });
+
+  test('returns the first failed:<step> across the batch', async () => {
+    mockSend.mockImplementation((cmd) => {
+      const id = cmd.Filters.find((f) => f.Name === 'resource-id').Values[0];
+      return Promise.resolve(id === 'i-2' ? tagsFor('failed:configuring') : tagsFor('downloading'));
+    });
+    await expect(aws.getBatchBootstrapStatus(['i-1', 'i-2', 'i-3'])).resolves.toBe('failed:configuring');
+  });
+
+  test('returns null when no instance has failed', async () => {
+    mockSend.mockImplementation(() => Promise.resolve(tagsFor('registered')));
+    await expect(aws.getBatchBootstrapStatus(['i-1', 'i-2'])).resolves.toBeNull();
+  });
+});
+
 describe('getConsoleOutputTail', () => {
   test('decodes base64 and returns the last N lines', async () => {
     const lines = Array.from({ length: 10 }, (_, i) => `line${i + 1}`).join('\n');
@@ -166,6 +183,34 @@ describe('handleStartFailure', () => {
     const warnings = core.warning.mock.calls.map((c) => String(c[0])).join('\n');
     expect(warnings).toContain('i-keep');
     expect(warnings).toContain('get-console-output');
+  });
+
+  test('captures ALL instances then terminates ALL (batch, no half-fleet)', async () => {
+    mockSend.mockImplementation((cmd) => {
+      if (cmd.__command === 'GetConsoleOutput') return Promise.resolve({ Output: b64('boot log') });
+      return Promise.resolve({});
+    });
+
+    await aws.handleStartFailure(['i-1', 'i-2'], { redactValues: [] });
+
+    // Every instance's console captured before any termination.
+    expect(commandsSent()).toEqual(['GetConsoleOutput', 'GetConsoleOutput', 'TerminateInstances', 'TerminateInstances']);
+    expect(core.startGroup).toHaveBeenCalledTimes(2);
+  });
+
+  test('preserves ALL instances when cleanup is disabled (batch)', async () => {
+    config.input.cleanupOnStartFailure = 'false';
+    mockSend.mockImplementation((cmd) => {
+      if (cmd.__command === 'GetConsoleOutput') return Promise.resolve({ Output: b64('x') });
+      return Promise.resolve({});
+    });
+
+    await aws.handleStartFailure(['i-1', 'i-2'], { redactValues: [] });
+
+    expect(commandsSent()).toEqual(['GetConsoleOutput', 'GetConsoleOutput']);
+    const warnings = core.warning.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(warnings).toContain('i-1');
+    expect(warnings).toContain('i-2');
   });
 
   test('does not throw if termination itself fails after capture', async () => {
