@@ -86,6 +86,16 @@ inputs:
       override, add the corresponding hash to the table in a PR.
     required: false
     default: '2.335.1'
+  architecture:
+    description: >-
+      Used only with the 'start' mode. CPU architecture of the runner:
+      'x64' (default) or 'arm64' (Graviton). Must match the AMI's
+      architecture — a mismatch fails fast at start with a clear error. All
+      instance types in an 'ec2-instance-type' fallback list must share this
+      architecture. Checksums for both architectures are pinned, so no other
+      change is needed to run on Graviton.
+    required: false
+    default: 'x64'
   encrypt-ebs:
     description: >-
       When 'true', the root EBS volume is created with SSE-EBS

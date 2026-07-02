@@ -40,6 +40,20 @@ const TRANSIENT_ERROR_CODES = new Set([
   'Unavailable',
 ]);
 
+// Map the action's `architecture` input to the AMI Architecture value that
+// DescribeImages reports.
+const AMI_ARCH_BY_INPUT = { x64: 'x86_64', arm64: 'arm64' };
+
+// Compare an AMI's reported Architecture against the requested architecture.
+// Returns true (match), false (mismatch — fail fast), or null (unknown —
+// the AMI didn't report an architecture; caller warns and continues).
+function matchAmiArchitecture(imageArchitecture, architecture) {
+  if (!imageArchitecture) {
+    return null;
+  }
+  return imageArchitecture === AMI_ARCH_BY_INPUT[architecture];
+}
+
 function classifyRunError(error) {
   const name = error && error.name;
   if (CAPACITY_ERROR_CODES.has(name)) {
@@ -485,6 +499,19 @@ async function startEc2Instance(label, githubRegistrationToken) {
   const resolved = await resolveImage(client);
   config.input.ec2ImageId = resolved.id;
 
+  // Fail fast on an AMI/architecture mismatch — the classic silent failure
+  // (an x64 tarball on an arm64 box, or vice versa) becomes a clear error
+  // in seconds instead of a registration timeout.
+  const amiArchMatch = matchAmiArchitecture(resolved.image.Architecture, config.input.architecture);
+  if (amiArchMatch === false) {
+    throw new Error(
+      `AMI ${resolved.id} is ${resolved.image.Architecture}, but 'architecture' is '${config.input.architecture}' ` +
+      `(expected ${AMI_ARCH_BY_INPUT[config.input.architecture]}). Point at an AMI matching the architecture, or fix the input.`,
+    );
+  } else if (amiArchMatch === null) {
+    log.warn('ami_architecture', { applied: false, reason: 'AMI did not report an architecture — skipping arch validation', ami_id: resolved.id });
+  }
+
   // InstanceType and SubnetId are injected per attempt by the fallback
   // chain (see below), so they are intentionally absent from the base.
   const params = {
@@ -777,6 +804,7 @@ module.exports = {
   listManagedInstances,
   // Exported for unit testing.
   classifyRunError,
+  matchAmiArchitecture,
   launchWithFallback,
   launchAcrossMarkets,
   buildMarketOptions,

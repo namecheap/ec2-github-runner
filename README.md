@@ -319,6 +319,7 @@ Now you're ready to go!
 | `aws-resource-tags`                                                                                                                                                          | Optional. Used only with the `start` mode. | Specifies tags to add to the EC2 instance and any attached storage. <br><br> This field is a stringified JSON array of tag objects, each containing a `Key` and `Value` field (see example below). <br><br> Setting this requires additional AWS permissions for the role launching the instance (see above).                         |
 | `eip-allocation-id` | Optional. Used only with the `start` mode. | Allocation Id of an Elastic IP to associate with the runner instance once it is running. |
 | `runner-version` | Optional. Used only with the `start` mode. | Version of the `actions/runner` binary to download and register (default `2.335.1`). <br><br> Must have a matching entry in `src/runner-checksums.js`; the action verifies the downloaded tarball's SHA-256 against that table before extraction. |
+| `architecture` | Optional. Used only with the `start` mode. | Runner CPU architecture: `x64` (default) or `arm64` (Graviton). Must match the AMI (validated at start). All types in an `ec2-instance-type` fallback list must share this arch. See [Running on Graviton (arm64)](#running-on-graviton-arm64). |
 | `http-tokens` | Optional. Used only with the `start` mode. | Instance Metadata Service (IMDS) token mode (default `required`). <br><br> - `required` — IMDSv2 only; mitigates SSRF-style credential theft. <br> - `optional` — also allows IMDSv1; set only if a workload on the runner needs it. |
 | `encrypt-ebs` | Optional. Used only with the `start` mode. | When `true`, the root EBS volume is created with SSE-EBS encryption using the account's default AWS-managed key (default `false`). Volume size / type / IOPS are preserved from the AMI unless overridden by the `volume-*` inputs below. |
 | `volume-size` | Optional. Used only with the `start` mode. | Root EBS volume size in GiB. Omitted = AMI default (Amazon Linux 2023: 8 GiB). Must be ≥ the AMI snapshot size. See [Disk space for Docker workloads](#disk-space-for-docker-workloads). |
@@ -461,6 +462,24 @@ A single `subnet-id` + `ec2-instance-type` means a single point of failure: when
 **Order:** for each instance type, every subnet/AZ is tried before downgrading to the next type (placement is cheaper than a hardware change). On an insufficient-capacity error the action advances to the next cell; **non-capacity errors** (invalid AMI, auth, or a quota like `InstanceLimitExceeded`) fail immediately so a misconfiguration doesn't burn through the whole matrix. Transient API errors are retried within each cell. Each failed placement logs a warning line (type, subnet, error code); full exhaustion fails with a summary of every attempt.
 
 The `instance-type-used` and `subnet-id-used` outputs report what actually launched. Single values keep the original single-attempt behavior.
+
+## Running on Graviton (arm64)
+
+Graviton instances (c7g/m7g/r7g/…) deliver ~20–40% better price/performance for the compile/test workloads CI runs, and Go/Rust/Node/Java toolchains are all arm64-native. Set `architecture: arm64` and point at an arm64 AMI:
+
+```yml
+- name: Start EC2 runner
+  uses: namecheap/ec2-github-runner@v3
+  with:
+    mode: start
+    architecture: arm64
+    ec2-instance-type: c7g.2xlarge # (or a Graviton fallback list: c7g.2xlarge,c6g.2xlarge)
+    ec2-image-filters: '[{"Name": "name", "Values": ["al2023-ami-*-arm64"]}, {"Name": "architecture", "Values": ["arm64"]}]'
+    ec2-image-owner: amazon
+    # ... other inputs ...
+```
+
+The checksums for both architectures are pinned, so nothing else needs changing. The action **validates the AMI's architecture against this input at start** — a mismatch (e.g. an x64 AMI with `architecture: arm64`) fails in seconds with a clear message instead of a cryptic bootstrap timeout. When using a [capacity-fallback](#capacity-fallback-across-azs-and-instance-types) list, all instance types must share the architecture (mixed lists are rejected at config parse). Graviton pairs especially well with [spot](#saving-costs-with-spot) — Graviton spot is the deepest discount in EC2.
 
 ## Disk space for Docker workloads
 

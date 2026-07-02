@@ -28,7 +28,24 @@ function parseCsv(value) {
   return value.split(',').map((v) => v.trim()).filter((v) => v.length > 0);
 }
 
+// Infer whether an EC2 instance type is arm64/Graviton from its name. AWS
+// Graviton families carry a 'g' as the processor letter after the
+// generation digit (c7g, m6gd, t4g, x2gd, im4gn, is4gen, hpc7g, g5g), plus
+// the first-gen a1. Everything else is treated as x64. Name-based heuristic
+// (no API call) — used only to reject obviously mixed-arch fallback lists.
+function isArmInstanceType(instanceType) {
+  const family = String(instanceType).split('.')[0];
+  return /\dg[a-z]*$/.test(family) || family === 'a1';
+}
+
+// The architecture ('x64' | 'arm64') implied by an instance type name.
+function instanceArch(instanceType) {
+  return isArmInstanceType(instanceType) ? 'arm64' : 'x64';
+}
+
 module.exports = {
   sortByCreationDate,
   parseCsv,
+  isArmInstanceType,
+  instanceArch,
 }

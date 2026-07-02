@@ -192,6 +192,34 @@ describe('Config — root volume inputs', () => {
   });
 });
 
+describe('Config — architecture input', () => {
+  test('defaults to x64', () => {
+    expect(loadConfig(startModeInputs).input.architecture).toBe('x64');
+  });
+
+  test('accepts arm64 with a Graviton instance type', () => {
+    const config = loadConfig({ ...startModeInputs, 'architecture': 'arm64', 'ec2-instance-type': 'c7g.4xlarge' });
+    expect(config.input.architecture).toBe('arm64');
+  });
+
+  test('accepts an arm64 fallback list of Graviton types', () => {
+    const config = loadConfig({ ...startModeInputs, 'architecture': 'arm64', 'ec2-instance-type': 'c7g.4xlarge,c6g.4xlarge,m7g.4xlarge' });
+    expect(config.input.architecture).toBe('arm64');
+  });
+
+  test('rejects an invalid architecture', () => {
+    expectValidationFailure({ ...startModeInputs, 'architecture': 'x86' }, /'architecture' must be one of/);
+  });
+
+  test('rejects a mixed-architecture instance-type list', () => {
+    expectValidationFailure({ ...startModeInputs, 'ec2-instance-type': 'c7g.4xlarge,c7i.4xlarge' }, /mixes architectures/);
+  });
+
+  test('rejects an instance type whose arch conflicts with the architecture input', () => {
+    expectValidationFailure({ ...startModeInputs, 'architecture': 'arm64', 'ec2-instance-type': 'c7i.4xlarge' }, /but 'architecture' is 'arm64'/);
+  });
+});
+
 describe('Config — spot / market inputs', () => {
   test('defaults to on-demand with default fallback', () => {
     const config = loadConfig(startModeInputs);
