@@ -35,6 +35,8 @@ const tagsOf = (spec) => {
 beforeEach(() => {
   mockSend.mockReset();
   config.input.awsResourceTags = [];
+  config.input.reuse = 'terminate';
+  config.input.reusePoolTag = 'default';
 });
 
 describe('buildTagSpecifications', () => {
@@ -55,6 +57,22 @@ describe('buildTagSpecifications', () => {
     const t = tagsOf(aws.buildTagSpecifications('l', 'ts')[0]);
     expect(t.Owner).toBe('devops');
     expect(t[aws.MANAGED_TAG_KEY]).toBe('true');
+  });
+
+  test('adds pool + cycles=0 tags when reuse is stop', () => {
+    config.input.reuse = 'stop';
+    config.input.reusePoolTag = 'ci-medium';
+    const t = tagsOf(aws.buildTagSpecifications('l', 'ts')[0]);
+    expect(t[aws.POOL_TAG_KEY]).toBe('ci-medium');
+    expect(t[aws.CYCLES_TAG_KEY]).toBe('0');
+    config.input.reuse = 'terminate';
+    config.input.reusePoolTag = undefined;
+  });
+
+  test('omits pool tags when reuse is terminate (default)', () => {
+    const t = tagsOf(aws.buildTagSpecifications('l', 'ts')[0]);
+    expect(t[aws.POOL_TAG_KEY]).toBeUndefined();
+    expect(t[aws.CYCLES_TAG_KEY]).toBeUndefined();
   });
 
   test('never lets a user tag override a reserved signature key', () => {
@@ -87,6 +105,7 @@ describe('listManagedInstances', () => {
         Instances: [{
           InstanceId: 'i-1',
           LaunchTime: '2026-07-02T10:00:00.000Z',
+          State: { Name: 'running' },
           Tags: [
             { Key: aws.MANAGED_TAG_KEY, Value: 'true' },
             { Key: aws.REPO_TAG_KEY, Value: 'my-org/my-repo' },
@@ -97,7 +116,7 @@ describe('listManagedInstances', () => {
       }],
     });
     const result = await aws.listManagedInstances('my-org/my-repo');
-    expect(result).toEqual([{ instanceId: 'i-1', label: 'runner-xyz', startedAtMs: Date.parse('2026-07-02T12:00:00.000Z') }]);
+    expect(result).toEqual([{ instanceId: 'i-1', label: 'runner-xyz', startedAtMs: Date.parse('2026-07-02T12:00:00.000Z'), state: 'running' }]);
   });
 
   test('falls back to LaunchTime when started-at tag is missing', async () => {

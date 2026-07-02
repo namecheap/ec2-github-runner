@@ -21,6 +21,7 @@ const config = require('./config');
 const log = require('./log');
 const { waitForRunnerReady } = require('./wait');
 const { runReaper, renderCleanupSummary, REAP_GRACE_MINUTES } = require('./cleanup');
+const { parseCsv } = require('./utils');
 const core = require('@actions/core');
 
 // Write directly to the $GITHUB_OUTPUT file. The bundled @actions/core
@@ -48,13 +49,49 @@ function setOutput(label, placement) {
   core.setOutput('market-type-used', marketType);
 }
 
+// Warm-pool fast path: reuse a stopped pool instance (count 1 only). Returns
+// a placement, or null to fall back to a cold launch (empty pool or a failed
+// start — the cold launch then joins the pool).
+async function tryWarmStart(label, githubRegistrationToken) {
+  const repo = `${config.githubContext.owner}/${config.githubContext.repo}`;
+  const instanceType = parseCsv(config.input.ec2InstanceType)[0];
+  const pool = await aws.findStoppedPoolInstance({
+    repo,
+    poolTag: config.input.reusePoolTag,
+    instanceType,
+    architecture: config.input.architecture,
+  });
+  if (!pool) {
+    log.info('warm_start', { outcome: 'pool_empty', pool: config.input.reusePoolTag });
+    return null;
+  }
+  try {
+    const userData = aws.buildReuseUserData(label, githubRegistrationToken);
+    await aws.warmStartInstance(pool.instanceId, { userData, label });
+    return { instanceIds: [pool.instanceId], instanceType, subnetId: pool.subnetId, marketType: 'reused' };
+  } catch (error) {
+    log.warn('warm_start', { instance_id: pool.instanceId, error: error.name, message: error.message });
+    core.warning(`Warm start of ${pool.instanceId} failed (${error.message}); cold-launching instead`);
+    return null;
+  }
+}
+
 async function start() {
   core.startGroup('start-runner');
   try {
     log.debug('start_inputs', config.input); // sanitized inside log.js
     const label = config.generateUniqueLabel();
     const githubRegistrationToken = await gh.getRegistrationToken();
-    const placement = await aws.startEc2Instance(label, githubRegistrationToken);
+
+    // Warm pool: reuse a stopped instance when reuse:stop and count 1;
+    // otherwise (or on empty pool / failed reuse) cold-launch.
+    let placement = null;
+    if (config.input.reuse === 'stop' && Number(config.input.count) === 1) {
+      placement = await tryWarmStart(label, githubRegistrationToken);
+    }
+    if (!placement) {
+      placement = await aws.startEc2Instance(label, githubRegistrationToken);
+    }
     const instanceIds = placement.instanceIds;
     setOutput(label, placement);
     for (const id of instanceIds) {
@@ -94,14 +131,29 @@ async function stop() {
       ? config.input.ec2InstanceIds
       : [config.input.ec2InstanceId];
 
+    const reuse = config.input.reuse === 'stop';
+    const maxCycles = Number(config.input.reuseMaxCycles);
     for (const id of instanceIds) {
       try {
-        await aws.terminateInstanceById(id);
+        if (reuse) {
+          // Warm pool: stop for reuse until the instance has served
+          // reuse-max-cycles jobs, then recycle it (terminate).
+          const cycles = await aws.getInstanceCycles(id);
+          if (cycles + 1 >= maxCycles) {
+            log.info('reuse', { instance_id: id, action: 'terminate', reason: 'max_cycles_reached', cycles });
+            await aws.terminateInstanceById(id);
+          } else {
+            await aws.setInstanceCycles(id, cycles + 1);
+            await aws.stopInstanceById(id);
+          }
+        } else {
+          await aws.terminateInstanceById(id);
+        }
       } catch (error) {
         if (error.name && error.name.includes('NotFound')) {
           log.info('terminate_instance', { instance_id: id, skipped: true, reason: 'already_gone' });
         } else {
-          failures.push({ step: `terminate_instance:${id}`, error: error.name, message: error.message });
+          failures.push({ step: `${reuse ? 'stop' : 'terminate'}_instance:${id}`, error: error.name, message: error.message });
         }
       }
     }
@@ -148,7 +200,8 @@ async function cleanup() {
 
     const summary = await runReaper(
       {
-        listManagedInstances: () => aws.listManagedInstances(repo),
+        // Include stopped instances so idle warm-pool instances are drained.
+        listManagedInstances: () => aws.listManagedInstances(repo, ['pending', 'running', 'stopped']),
         getRunnerByLabel: (label) => gh.getRunner(label),
         terminateInstance: (id) => aws.terminateInstanceById(id),
         deregisterRunner: (runnerId) => gh.deregisterRunner(runnerId),
@@ -157,6 +210,7 @@ async function cleanup() {
       {
         maxAgeMinutes: Number(config.input.maxAgeMinutes),
         graceMinutes: REAP_GRACE_MINUTES,
+        stoppedMaxAgeMinutes: Number(config.input.reaperStoppedMaxAge),
         dryRun,
       },
     );

@@ -257,6 +257,34 @@ describe('Config — bootstrap extension inputs', () => {
   });
 });
 
+describe('Config — reuse / warm-pool inputs', () => {
+  test('defaults to terminate with default pool + cycles', () => {
+    const config = loadConfig(startModeInputs);
+    expect(config.input.reuse).toBe('terminate');
+    expect(config.input.reusePoolTag).toBe('default');
+    expect(config.input.reuseMaxCycles).toBe('20');
+  });
+
+  test('accepts reuse:stop with a pool tag and cycle cap', () => {
+    const config = loadConfig({ ...startModeInputs, 'reuse': 'stop', 'reuse-pool-tag': 'ci-medium', 'reuse-max-cycles': '10' });
+    expect(config.input.reuse).toBe('stop');
+    expect(config.input.reusePoolTag).toBe('ci-medium');
+    expect(config.input.reuseMaxCycles).toBe('10');
+  });
+
+  test('rejects an invalid reuse value', () => {
+    expectValidationFailure({ ...startModeInputs, 'reuse': 'recycle' }, /'reuse' must be one of/);
+  });
+
+  test('rejects a non-integer reuse-max-cycles', () => {
+    expectValidationFailure({ ...startModeInputs, 'reuse-max-cycles': 'lots' }, /'reuse-max-cycles' must be a positive integer/);
+  });
+
+  test('validates reuse in stop mode too', () => {
+    expectValidationFailure({ ...stopModeInputs, 'reuse': 'nope' }, /'reuse' must be one of/);
+  });
+});
+
 describe('Config — architecture input', () => {
   test('defaults to x64', () => {
     expect(loadConfig(startModeInputs).input.architecture).toBe('x64');

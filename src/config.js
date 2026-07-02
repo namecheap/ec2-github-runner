@@ -24,6 +24,10 @@ class Config {
       allowPartial: core.getInput('allow-partial') || 'false',
       preRunnerScript: core.getInput('pre-runner-script'),
       userDataTemplate: core.getInput('user-data-template'),
+      reuse: core.getInput('reuse') || 'terminate',
+      reusePoolTag: core.getInput('reuse-pool-tag') || 'default',
+      reuseMaxCycles: core.getInput('reuse-max-cycles') || '20',
+      reaperStoppedMaxAge: core.getInput('reaper-stopped-max-age') || '1440',
       iamRoleName: core.getInput('iam-role-name'),
       runnerVersion: core.getInput('runner-version') || '2.335.1',
       architecture: core.getInput('architecture') || 'x64',
@@ -78,12 +82,14 @@ class Config {
       this.validateArchitectureInputs();
       this.validateCountInput();
       this.validateBootstrapInputs();
+      this.validateReuseInputs();
     } else if (this.input.mode === 'stop') {
       // A stop needs the shared label plus at least one instance id — either
       // the compat scalar or the JSON array from a batched start.
       if (!this.input.label || (!this.input.ec2InstanceId && !(this.input.ec2InstanceIds && this.input.ec2InstanceIds.length))) {
         throw new Error(`Not all the required inputs are provided for the 'stop' mode`);
       }
+      this.validateReuseInputs();
     } else if (this.input.mode === 'cleanup') {
       // The reaper needs only the github-token (validated above) and
       // operates on the current repository; max-age-minutes and dry-run
@@ -161,6 +167,16 @@ class Config {
   validateBootstrapInputs() {
     if (this.input.userDataTemplate && this.input.preRunnerScript) {
       throw new Error(`'user-data-template' and 'pre-runner-script' are mutually exclusive`);
+    }
+  }
+
+  // Validate the warm-pool reuse inputs (start + stop).
+  validateReuseInputs() {
+    if (!['terminate', 'stop'].includes(this.input.reuse)) {
+      throw new Error(`'reuse' must be one of: terminate, stop`);
+    }
+    if (!(/^[0-9]+$/.test(this.input.reuseMaxCycles) && Number(this.input.reuseMaxCycles) >= 1)) {
+      throw new Error(`'reuse-max-cycles' must be a positive integer`);
     }
   }
 
