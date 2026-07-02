@@ -5,7 +5,7 @@
 ## Using a template
 
 ```yml
-- uses: namecheap/ec2-github-runner@v3
+- uses: namecheap/ec2-github-runner@v4
   with:
     mode: start
     github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
