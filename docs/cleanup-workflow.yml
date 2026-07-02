@@ -1,0 +1,39 @@
+# Example: scheduled reaper for leaked ec2-github-runner instances.
+#
+# Runs `mode: cleanup` on a schedule to terminate runner instances this
+# action started in THIS repository that leaked past the normal stop step
+# (cancelled workflows, runner crashes, GitHub/AWS outages mid-run). It is
+# safe to run alongside in-flight `start` jobs: instances younger than a
+# 15-minute grace floor are never reaped, and busy runners are never
+# reaped regardless of age.
+#
+# Save this as .github/workflows/cleanup-ec2-runners.yml in your repo.
+name: Cleanup leaked EC2 runners
+on:
+  schedule:
+    - cron: '*/30 * * * *' # every 30 minutes
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: 'List candidates without terminating anything'
+        type: boolean
+        default: false
+
+jobs:
+  cleanup:
+    name: Reap orphaned EC2 runners
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+      - name: Reap leaked runners
+        uses: namecheap/ec2-github-runner@v3
+        with:
+          mode: cleanup
+          github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+          max-age-minutes: 120 # reap idle runners older than this
+          dry-run: ${{ inputs.dry-run || false }}

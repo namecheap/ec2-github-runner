@@ -88,4 +88,19 @@ describe('buildUserData', () => {
     const ud = buildUserData(args);
     expect(ud).toContain('--ephemeral --unattended --disableupdate');
   });
+
+  test('arms a TTL self-destruct shutdown when max-lifetime-minutes > 0', () => {
+    const ud = buildUserData({ ...args, maxLifetimeMinutes: '360' });
+    expect(ud).toContain('shutdown -h +360 || true');
+  });
+
+  test('omits the TTL shutdown when max-lifetime-minutes is 0', () => {
+    const ud = buildUserData({ ...args, maxLifetimeMinutes: '0' });
+    expect(ud).not.toContain('shutdown -h');
+  });
+
+  test('omits the TTL shutdown when max-lifetime-minutes is unset', () => {
+    const ud = buildUserData(args);
+    expect(ud).not.toContain('shutdown -h');
+  });
 });

@@ -60,19 +60,15 @@ describe('Config — start mode', () => {
     expect(config.githubContext).toEqual({ owner: 'namecheap', repo: 'ec2-github-runner' });
   });
 
-  test('builds tagSpecifications for instance and volume when tags provided', () => {
+  test('parses aws-resource-tags into the awsResourceTags array', () => {
     const tags = [{ Key: 'Owner', Value: 'devops' }];
     const config = loadConfig({ ...startModeInputs, 'aws-resource-tags': JSON.stringify(tags) });
-
-    expect(config.tagSpecifications).toHaveLength(2);
-    expect(config.tagSpecifications[0].ResourceType).toBe('instance');
-    expect(config.tagSpecifications[1].ResourceType).toBe('volume');
-    expect(config.tagSpecifications[0].Tags).toEqual(tags);
+    expect(config.input.awsResourceTags).toEqual(tags);
   });
 
-  test('tagSpecifications is null when aws-resource-tags is empty list', () => {
+  test('awsResourceTags is an empty array when aws-resource-tags is empty list', () => {
     const config = loadConfig({ ...startModeInputs, 'aws-resource-tags': '[]' });
-    expect(config.tagSpecifications).toBeNull();
+    expect(config.input.awsResourceTags).toEqual([]);
   });
 
   test('reports missing mode via core.setFailed', () => {
@@ -127,7 +123,44 @@ describe('Config — stop mode', () => {
 
 describe('Config — mode validation', () => {
   test('reports unknown mode via core.setFailed', () => {
-    expectValidationFailure({ ...startModeInputs, 'mode': 'restart' }, /Wrong mode. Allowed values: start, stop/);
+    expectValidationFailure({ ...startModeInputs, 'mode': 'restart' }, /Wrong mode. Allowed values: start, stop, cleanup/);
+  });
+});
+
+describe('Config — cleanup mode', () => {
+  const cleanupModeInputs = {
+    'mode': 'cleanup',
+    'github-token': 'ghs_testtoken',
+    'aws-resource-tags': '[]',
+  };
+
+  test('valid inputs produce a config with defaulted cleanup knobs', () => {
+    const config = loadConfig(cleanupModeInputs);
+    expect(config.input.mode).toBe('cleanup');
+    expect(config.input.maxAgeMinutes).toBe('120');
+    expect(config.input.dryRun).toBe('false');
+  });
+
+  test('honors max-age-minutes and dry-run overrides', () => {
+    const config = loadConfig({ ...cleanupModeInputs, 'max-age-minutes': '30', 'dry-run': 'true' });
+    expect(config.input.maxAgeMinutes).toBe('30');
+    expect(config.input.dryRun).toBe('true');
+  });
+
+  test('still requires github-token', () => {
+    expectValidationFailure({ ...cleanupModeInputs, 'github-token': '' }, /'github-token' input is not specified/);
+  });
+});
+
+describe('Config — max-lifetime-minutes input', () => {
+  test('defaults to 360 when unset', () => {
+    const config = loadConfig(startModeInputs);
+    expect(config.input.maxLifetimeMinutes).toBe('360');
+  });
+
+  test('honors an explicit override, including 0 to disable', () => {
+    expect(loadConfig({ ...startModeInputs, 'max-lifetime-minutes': '720' }).input.maxLifetimeMinutes).toBe('720');
+    expect(loadConfig({ ...startModeInputs, 'max-lifetime-minutes': '0' }).input.maxLifetimeMinutes).toBe('0');
   });
 });
 

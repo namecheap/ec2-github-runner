@@ -36,9 +36,17 @@ async function getRegistrationToken() {
   }
 }
 
+// Deregister a self-hosted runner by its GitHub runner id. Idempotent
+// (DELETE), so it's retried on transient errors.
+async function deregisterRunner(runnerId) {
+  const octokit = github.getOctokit(config.input.githubToken);
+  await withRetry('remove_runner', () =>
+    octokit.request('DELETE /repos/{owner}/{repo}/actions/runners/{runner_id}', { ...config.githubContext, runner_id: runnerId }),
+  );
+}
+
 async function removeRunner() {
   const runner = await getRunner(config.input.label);
-  const octokit = github.getOctokit(config.input.githubToken);
 
   // skip the runner removal process if the runner is not found
   if (!runner) {
@@ -50,9 +58,7 @@ async function removeRunner() {
   const start = Date.now();
   log.info('remove_runner', { runner_id: runner.id, label: config.input.label });
   try {
-    await withRetry('remove_runner', () =>
-      octokit.request('DELETE /repos/{owner}/{repo}/actions/runners/{runner_id}', { ...config.githubContext, runner_id: runner.id }),
-    );
+    await deregisterRunner(runner.id);
     log.info('remove_runner', { runner_id: runner.id, label: config.input.label, elapsed_ms: Date.now() - start });
     core.info(`GitHub self-hosted runner ${runner.name} is removed`);
     return;
@@ -75,5 +81,7 @@ async function isRunnerOnline(label) {
 module.exports = {
   getRegistrationToken,
   removeRunner,
+  deregisterRunner,
   isRunnerOnline,
+  getRunner,
 };

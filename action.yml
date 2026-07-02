@@ -9,7 +9,9 @@ inputs:
     description: >-
       Specify here which mode you want to use:
         - 'start' - to start a new runner;
-        - 'stop' - to stop the previously created runner.
+        - 'stop' - to stop the previously created runner;
+        - 'cleanup' - to reap leaked/orphaned runner instances this
+          action started in the current repository (run on a schedule).
     required: true
   github-token:
     description: >-
@@ -116,6 +118,32 @@ inputs:
       the instance running after a registration timeout.
     required: false
     default: 'true'
+  max-lifetime-minutes:
+    description: >-
+      Used only with the 'start' mode. Hard upper bound, in minutes, on
+      the runner instance's lifetime. The instance arms a self-shutdown
+      timer and launches with InstanceInitiatedShutdownBehavior=terminate,
+      so it terminates itself when the timer fires even if GitHub, the
+      workflow, and the AWS control plane are all unreachable. Size it
+      above your longest legitimate job. Set '0' to disable the timer.
+    required: false
+    default: '360'
+  max-age-minutes:
+    description: >-
+      Used only with the 'cleanup' mode. A registered-but-idle runner
+      instance older than this many minutes is considered orphaned and
+      reaped. Instances whose runner is no longer registered are reaped
+      regardless of age (subject to a 15-minute grace floor that protects
+      in-flight starts). Busy runners are never reaped.
+    required: false
+    default: '120'
+  dry-run:
+    description: >-
+      Used only with the 'cleanup' mode. When 'true', the reaper lists the
+      instances it would terminate (and why) in the job summary without
+      terminating anything or deregistering any runners.
+    required: false
+    default: 'false'
   debug:
     description: >-
       When 'true', the action emits extra diagnostic output to the

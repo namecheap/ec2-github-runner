@@ -20,6 +20,7 @@ const gh = require('./gh');
 const config = require('./config');
 const log = require('./log');
 const { waitForRunnerReady } = require('./wait');
+const { runReaper, renderCleanupSummary, REAP_GRACE_MINUTES } = require('./cleanup');
 const core = require('@actions/core');
 
 // Write directly to the $GITHUB_OUTPUT file. The bundled @actions/core
@@ -98,9 +99,55 @@ async function stop() {
   }
 }
 
+// Write the reaper's job-summary table to $GITHUB_STEP_SUMMARY (the
+// documented mechanism) and echo it to the log so it's visible even when
+// the summary file isn't set (e.g. local runs).
+function writeJobSummary(markdown) {
+  const summaryFile = process.env.GITHUB_STEP_SUMMARY;
+  if (summaryFile) {
+    fs.appendFileSync(summaryFile, `${markdown}${os.EOL}`);
+  }
+  core.info(markdown);
+}
+
+async function cleanup() {
+  core.startGroup('cleanup-runners');
+  try {
+    const repo = `${config.githubContext.owner}/${config.githubContext.repo}`;
+    const dryRun = config.input.dryRun === 'true';
+    log.info('cleanup', { repo, max_age_minutes: config.input.maxAgeMinutes, dry_run: dryRun });
+
+    const summary = await runReaper(
+      {
+        listManagedInstances: () => aws.listManagedInstances(repo),
+        getRunnerByLabel: (label) => gh.getRunner(label),
+        terminateInstance: (id) => aws.terminateInstanceById(id),
+        deregisterRunner: (runnerId) => gh.deregisterRunner(runnerId),
+        now: () => Date.now(),
+      },
+      {
+        maxAgeMinutes: Number(config.input.maxAgeMinutes),
+        graceMinutes: REAP_GRACE_MINUTES,
+        dryRun,
+      },
+    );
+
+    writeJobSummary(renderCleanupSummary(summary));
+    log.info('cleanup', { outcome: 'ok', examined: summary.examined, reaped: summary.reaped, skipped: summary.skipped, dry_run: dryRun });
+  } finally {
+    core.endGroup();
+  }
+}
+
 (async function () {
   try {
-    config.input.mode === 'start' ? await start() : await stop();
+    if (config.input.mode === 'start') {
+      await start();
+    } else if (config.input.mode === 'stop') {
+      await stop();
+    } else {
+      await cleanup();
+    }
   } catch (error) {
     log.error('fatal', { mode: config.input.mode, error: error.name, message: error.message });
     core.error(error);
