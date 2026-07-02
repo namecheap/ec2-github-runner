@@ -317,7 +317,11 @@ Now you're ready to go!
 | `eip-allocation-id` | Optional. Used only with the `start` mode. | Allocation Id of an Elastic IP to associate with the runner instance once it is running. |
 | `runner-version` | Optional. Used only with the `start` mode. | Version of the `actions/runner` binary to download and register (default `2.335.1`). <br><br> Must have a matching entry in `src/runner-checksums.js`; the action verifies the downloaded tarball's SHA-256 against that table before extraction. |
 | `http-tokens` | Optional. Used only with the `start` mode. | Instance Metadata Service (IMDS) token mode (default `required`). <br><br> - `required` — IMDSv2 only; mitigates SSRF-style credential theft. <br> - `optional` — also allows IMDSv1; set only if a workload on the runner needs it. |
-| `encrypt-ebs` | Optional. Used only with the `start` mode. | When `true`, the root EBS volume is created with SSE-EBS encryption using the account's default AWS-managed key (default `false`). Volume size / type / IOPS are preserved from the AMI. |
+| `encrypt-ebs` | Optional. Used only with the `start` mode. | When `true`, the root EBS volume is created with SSE-EBS encryption using the account's default AWS-managed key (default `false`). Volume size / type / IOPS are preserved from the AMI unless overridden by the `volume-*` inputs below. |
+| `volume-size` | Optional. Used only with the `start` mode. | Root EBS volume size in GiB. Omitted = AMI default (Amazon Linux 2023: 8 GiB). Must be ≥ the AMI snapshot size. See [Disk space for Docker workloads](#disk-space-for-docker-workloads). |
+| `volume-type` | Optional. Used only with the `start` mode. | Root EBS volume type: `gp3` (recommended), `gp2`, `io1`, or `io2`. Omitted = AMI default. |
+| `volume-iops` | Optional. Used only with the `start` mode. | Provisioned IOPS for the root volume. Only valid with `volume-type` `io1`, `io2`, or `gp3`. |
+| `volume-throughput` | Optional. Used only with the `start` mode. | Root volume throughput in MiB/s. Only valid with `volume-type` `gp3`. |
 | `cleanup-on-start-failure` | Optional. Used only with the `start` mode. | When `true` (default), a runner that fails to bootstrap or register has its console output captured and is then terminated so the failed start doesn't leak a billing instance. Set `false` to leave the instance running for interactive debugging. <br><br> **Behavior change:** older versions left the instance running after a registration timeout; the default is now to terminate it. See [Troubleshooting a failed start](#troubleshooting-a-failed-start). |
 | `max-lifetime-minutes` | Optional. Used only with the `start` mode. | Hard upper bound (minutes) on the instance's lifetime (default `360`). The instance arms a self-shutdown timer and launches with `InstanceInitiatedShutdownBehavior=terminate`, so it terminates itself at the TTL even if GitHub, the workflow, and AWS APIs are all unreachable. Size it **above your longest legitimate job** — a job still running at the TTL is killed. Set `0` to disable. See [Reaping orphaned runners](#reaping-orphaned-runners-mode-cleanup). |
 | `max-age-minutes` | Optional. Used only with the `cleanup` mode. | A registered-but-idle runner instance older than this many minutes is reaped (default `120`). Instances whose runner is no longer registered are reaped regardless of age, subject to a 15-minute grace floor that protects in-flight starts. Busy runners are never reaped. |
@@ -414,6 +418,23 @@ jobs:
 In [this discussion](https://github.com/machulav/ec2-github-runner/discussions/19), you can find feedback and examples from the users of the action.
 
 If you use this action in your workflow, feel free to add your story there as well 🙌
+
+## Disk space for Docker workloads
+
+The runner inherits the AMI's root volume size — 8 GiB on Amazon Linux 2023. Docker-based CI exhausts that almost immediately (a couple of large images plus build cache), and the job dies with `no space left on device` — one of the most common self-hosted-runner failures. Size the root volume for your workload:
+
+```yml
+- name: Start EC2 runner
+  uses: namecheap/ec2-github-runner@v3
+  with:
+    mode: start
+    # ... other inputs ...
+    volume-size: 100 # GiB
+    volume-type: gp3
+    volume-throughput: 250 # MiB/s (gp3 only, optional)
+```
+
+`volume-size` must be at least the AMI snapshot size (validated up front). The volume is always created with `DeleteOnTermination: true`, so it's removed with the ephemeral instance and never leaks. Sizing composes with `encrypt-ebs` — set both to get an encrypted, resized root volume in one shot.
 
 ## Reaping orphaned runners (`mode: cleanup`)
 

@@ -94,6 +94,28 @@ inputs:
       this — opt in explicitly when you've verified the permissions.
     required: false
     default: 'false'
+  volume-size:
+    description: >-
+      Used only with the 'start' mode. Root EBS volume size in GiB. When
+      omitted, the AMI's default size is used (Amazon Linux 2023: 8 GiB,
+      which Docker-based CI exhausts quickly). Must be >= the AMI snapshot
+      size. Composes with encrypt-ebs.
+    required: false
+  volume-type:
+    description: >-
+      Used only with the 'start' mode. Root EBS volume type: one of gp3
+      (recommended), gp2, io1, io2. When omitted, the AMI default is used.
+    required: false
+  volume-iops:
+    description: >-
+      Used only with the 'start' mode. Provisioned IOPS for the root
+      volume. Only valid with volume-type io1, io2, or gp3.
+    required: false
+  volume-throughput:
+    description: >-
+      Used only with the 'start' mode. Root volume throughput in MiB/s.
+      Only valid with volume-type gp3.
+    required: false
   http-tokens:
     description: >-
       Instance Metadata Service (IMDS) token mode. Accepted values:
