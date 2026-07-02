@@ -1,5 +1,6 @@
 const core = require('@actions/core');
 const github = require('@actions/github');
+const { parseCsv, instanceArch } = require('./utils');
 
 class Config {
   constructor() {
@@ -20,6 +21,7 @@ class Config {
       ec2InstanceId: core.getInput('ec2-instance-id'),
       iamRoleName: core.getInput('iam-role-name'),
       runnerVersion: core.getInput('runner-version') || '2.335.1',
+      architecture: core.getInput('architecture') || 'x64',
       httpTokens: core.getInput('http-tokens') || 'required',
       encryptEbs: core.getInput('encrypt-ebs') || 'false',
       volumeSize: core.getInput('volume-size'),
@@ -68,6 +70,7 @@ class Config {
       }
       this.validateVolumeInputs();
       this.validateMarketInputs();
+      this.validateArchitectureInputs();
     } else if (this.input.mode === 'stop') {
       if (!this.input.label || !this.input.ec2InstanceId) {
         throw new Error(`Not all the required inputs are provided for the 'stop' mode`);
@@ -123,6 +126,24 @@ class Config {
     // Positive decimal string, e.g. "0.05" or "1". Empty = AWS default cap.
     if (spotMaxPrice && !(/^[0-9]+(\.[0-9]+)?$/.test(spotMaxPrice) && Number(spotMaxPrice) > 0)) {
       throw new Error(`'spot-max-price' must be a positive decimal (USD/hour), e.g. 0.05`);
+    }
+  }
+
+  // Validate the architecture input and that the ec2-instance-type fallback
+  // list is single-architecture and consistent with it. Placement and arch
+  // are kept orthogonal: a fallback chain must not mix arm64 and x64 types.
+  validateArchitectureInputs() {
+    const arch = this.input.architecture;
+    if (!['x64', 'arm64'].includes(arch)) {
+      throw new Error(`'architecture' must be one of: x64, arm64`);
+    }
+    const types = parseCsv(this.input.ec2InstanceType);
+    const arches = [...new Set(types.map(instanceArch))];
+    if (arches.length > 1) {
+      throw new Error(`'ec2-instance-type' mixes architectures (${types.join(', ')}); all types in a fallback list must share one architecture`);
+    }
+    if (types.length > 0 && !arches.includes(arch)) {
+      throw new Error(`'ec2-instance-type' (${types.join(', ')}) looks like ${arches[0]} but 'architecture' is '${arch}'`);
     }
   }
 

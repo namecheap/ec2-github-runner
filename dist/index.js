@@ -104690,6 +104690,20 @@ const TRANSIENT_ERROR_CODES = new Set([
   'Unavailable',
 ]);
 
+// Map the action's `architecture` input to the AMI Architecture value that
+// DescribeImages reports.
+const AMI_ARCH_BY_INPUT = { x64: 'x86_64', arm64: 'arm64' };
+
+// Compare an AMI's reported Architecture against the requested architecture.
+// Returns true (match), false (mismatch — fail fast), or null (unknown —
+// the AMI didn't report an architecture; caller warns and continues).
+function matchAmiArchitecture(imageArchitecture, architecture) {
+  if (!imageArchitecture) {
+    return null;
+  }
+  return imageArchitecture === AMI_ARCH_BY_INPUT[architecture];
+}
+
 function classifyRunError(error) {
   const name = error && error.name;
   if (CAPACITY_ERROR_CODES.has(name)) {
@@ -105135,6 +105149,19 @@ async function startEc2Instance(label, githubRegistrationToken) {
   const resolved = await resolveImage(client);
   config.input.ec2ImageId = resolved.id;
 
+  // Fail fast on an AMI/architecture mismatch — the classic silent failure
+  // (an x64 tarball on an arm64 box, or vice versa) becomes a clear error
+  // in seconds instead of a registration timeout.
+  const amiArchMatch = matchAmiArchitecture(resolved.image.Architecture, config.input.architecture);
+  if (amiArchMatch === false) {
+    throw new Error(
+      `AMI ${resolved.id} is ${resolved.image.Architecture}, but 'architecture' is '${config.input.architecture}' ` +
+      `(expected ${AMI_ARCH_BY_INPUT[config.input.architecture]}). Point at an AMI matching the architecture, or fix the input.`,
+    );
+  } else if (amiArchMatch === null) {
+    log.warn('ami_architecture', { applied: false, reason: 'AMI did not report an architecture — skipping arch validation', ami_id: resolved.id });
+  }
+
   // InstanceType and SubnetId are injected per attempt by the fallback
   // chain (see below), so they are intentionally absent from the base.
   const params = {
@@ -105427,6 +105454,7 @@ module.exports = {
   listManagedInstances,
   // Exported for unit testing.
   classifyRunError,
+  matchAmiArchitecture,
   launchWithFallback,
   launchAcrossMarkets,
   buildMarketOptions,
@@ -105595,6 +105623,7 @@ module.exports = {
 
 const core = __nccwpck_require__(7484);
 const github = __nccwpck_require__(3228);
+const { parseCsv, instanceArch } = __nccwpck_require__(5804);
 
 class Config {
   constructor() {
@@ -105615,6 +105644,7 @@ class Config {
       ec2InstanceId: core.getInput('ec2-instance-id'),
       iamRoleName: core.getInput('iam-role-name'),
       runnerVersion: core.getInput('runner-version') || '2.335.1',
+      architecture: core.getInput('architecture') || 'x64',
       httpTokens: core.getInput('http-tokens') || 'required',
       encryptEbs: core.getInput('encrypt-ebs') || 'false',
       volumeSize: core.getInput('volume-size'),
@@ -105663,6 +105693,7 @@ class Config {
       }
       this.validateVolumeInputs();
       this.validateMarketInputs();
+      this.validateArchitectureInputs();
     } else if (this.input.mode === 'stop') {
       if (!this.input.label || !this.input.ec2InstanceId) {
         throw new Error(`Not all the required inputs are provided for the 'stop' mode`);
@@ -105718,6 +105749,24 @@ class Config {
     // Positive decimal string, e.g. "0.05" or "1". Empty = AWS default cap.
     if (spotMaxPrice && !(/^[0-9]+(\.[0-9]+)?$/.test(spotMaxPrice) && Number(spotMaxPrice) > 0)) {
       throw new Error(`'spot-max-price' must be a positive decimal (USD/hour), e.g. 0.05`);
+    }
+  }
+
+  // Validate the architecture input and that the ec2-instance-type fallback
+  // list is single-architecture and consistent with it. Placement and arch
+  // are kept orthogonal: a fallback chain must not mix arm64 and x64 types.
+  validateArchitectureInputs() {
+    const arch = this.input.architecture;
+    if (!['x64', 'arm64'].includes(arch)) {
+      throw new Error(`'architecture' must be one of: x64, arm64`);
+    }
+    const types = parseCsv(this.input.ec2InstanceType);
+    const arches = [...new Set(types.map(instanceArch))];
+    if (arches.length > 1) {
+      throw new Error(`'ec2-instance-type' mixes architectures (${types.join(', ')}); all types in a fallback list must share one architecture`);
+    }
+    if (types.length > 0 && !arches.includes(arch)) {
+      throw new Error(`'ec2-instance-type' (${types.join(', ')}) looks like ${arches[0]} but 'architecture' is '${arch}'`);
     }
   }
 
@@ -106071,9 +106120,26 @@ function parseCsv(value) {
   return value.split(',').map((v) => v.trim()).filter((v) => v.length > 0);
 }
 
+// Infer whether an EC2 instance type is arm64/Graviton from its name. AWS
+// Graviton families carry a 'g' as the processor letter after the
+// generation digit (c7g, m6gd, t4g, x2gd, im4gn, is4gen, hpc7g, g5g), plus
+// the first-gen a1. Everything else is treated as x64. Name-based heuristic
+// (no API call) — used only to reject obviously mixed-arch fallback lists.
+function isArmInstanceType(instanceType) {
+  const family = String(instanceType).split('.')[0];
+  return /\dg[a-z]*$/.test(family) || family === 'a1';
+}
+
+// The architecture ('x64' | 'arm64') implied by an instance type name.
+function instanceArch(instanceType) {
+  return isArmInstanceType(instanceType) ? 'arm64' : 'x64';
+}
+
 module.exports = {
   sortByCreationDate,
   parseCsv,
+  isArmInstanceType,
+  instanceArch,
 }
 
 

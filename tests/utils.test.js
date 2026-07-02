@@ -1,4 +1,20 @@
-const { sortByCreationDate, parseCsv } = require('../src/utils');
+const { sortByCreationDate, parseCsv, isArmInstanceType, instanceArch } = require('../src/utils');
+
+describe('isArmInstanceType / instanceArch', () => {
+  test('recognizes Graviton families as arm64', () => {
+    for (const t of ['c7g.4xlarge', 'm6g.large', 't4g.small', 'c7gd.2xlarge', 'c7gn.xlarge', 'x2gd.medium', 'im4gn.large', 'is4gen.large', 'a1.large', 'hpc7g.16xlarge']) {
+      expect(isArmInstanceType(t)).toBe(true);
+      expect(instanceArch(t)).toBe('arm64');
+    }
+  });
+
+  test('treats Intel/AMD families as x64', () => {
+    for (const t of ['c7i.4xlarge', 'c6a.large', 'm5.xlarge', 't3.medium', 'c5n.2xlarge', 'r5.large', 'g5.xlarge']) {
+      expect(isArmInstanceType(t)).toBe(false);
+      expect(instanceArch(t)).toBe('x64');
+    }
+  });
+});
 
 describe('parseCsv', () => {
   test('splits and trims a comma-separated list', () => {
