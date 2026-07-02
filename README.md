@@ -12,7 +12,7 @@ And all this automatically as a part of your GitHub Actions workflow.
 >
 > The bootstrap script that this action injects as EC2 `user-data` is hardcoded to use `yum`, `useradd`, `sudo`, `bash`, and a `tmpfs` `/tmp`. That means the AMI you pass via `ec2-image-id` **must** be a yum-based distribution — Amazon Linux 2023 (the tested baseline), Amazon Linux 2, or a RHEL-family image (RHEL / CentOS Stream / Rocky / Alma) whose `/tmp` is mounted as tmpfs.
 >
-> **Debian, Ubuntu, Alpine, and any other non-yum distributions are not supported.** If you launch this action against such an AMI, the EC2 instance will boot but the runner bootstrap will fail silently inside cloud-init, and the action will eventually time out with a registration error. Cross-distro support is not on the roadmap — if you need it, fork and replace the `userData` array in `src/aws.js`.
+> **Debian, Ubuntu, Alpine, and any other non-yum distributions are not supported.** If you launch this action against such an AMI, the EC2 instance will boot but the runner bootstrap will fail. The action now surfaces this quickly: it fails fast naming the failing step and prints the instance's console output (see [Troubleshooting a failed start](#troubleshooting-a-failed-start)). Cross-distro support is not on the roadmap — if you need it, fork and replace the `userData` bootstrap in `src/aws.js`.
 
 ![GitHub Actions self-hosted EC2 runner](docs/images/github-actions-runner.gif)
 
@@ -142,13 +142,39 @@ This action reads AWS credentials from the environment. Two paths — pick one.
            "ec2:TerminateInstances",
            "ec2:DescribeInstances",
            "ec2:DescribeInstanceStatus",
-           "ec2:DescribeImages"
+           "ec2:DescribeImages",
+           "ec2:DescribeTags",
+           "ec2:GetConsoleOutput"
          ],
          "Resource": "*"
        }
      ]
    }
    ```
+
+   `ec2:DescribeTags` and `ec2:GetConsoleOutput` power the [bootstrap diagnostics](#troubleshooting-a-failed-start): the action reads the instance's bootstrap phone-home tag to fail fast on cloud-init errors, and captures the serial-console output when a start fails. `ec2:TerminateInstances` also covers the default cleanup of a failed start (see `cleanup-on-start-failure`).
+
+   **Bootstrap phone-home (optional, recommended).** For the instance to tag its own bootstrap progress — which lets the action fail fast and name the failing step instead of waiting out the full registration timeout — the IAM role attached to the runner via `iam-role-name` needs permission to tag itself:
+
+   ```
+   {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Effect": "Allow",
+        "Action": "ec2:CreateTags",
+        "Resource": "arn:aws:ec2:*:<account>:instance/*",
+        "Condition": {
+          "StringEquals": {
+            "aws:ARN": "${ec2:SourceInstanceARN}"
+          }
+        }
+      }
+    ]
+   }
+   ```
+
+   The condition scopes the permission so an instance can tag only itself. This is best-effort: if you don't set `iam-role-name`, or omit this permission, phone-home tagging is skipped and the action falls back to registration-timeout detection with no error.
 
    If you plan to attach an IAM role to the EC2 runner with the `iam-role-name` parameter, you will need to allow additional permissions:
 
@@ -290,6 +316,7 @@ Now you're ready to go!
 | `runner-version` | Optional. Used only with the `start` mode. | Version of the `actions/runner` binary to download and register (default `2.335.1`). <br><br> Must have a matching entry in `src/runner-checksums.js`; the action verifies the downloaded tarball's SHA-256 against that table before extraction. |
 | `http-tokens` | Optional. Used only with the `start` mode. | Instance Metadata Service (IMDS) token mode (default `required`). <br><br> - `required` — IMDSv2 only; mitigates SSRF-style credential theft. <br> - `optional` — also allows IMDSv1; set only if a workload on the runner needs it. |
 | `encrypt-ebs` | Optional. Used only with the `start` mode. | When `true`, the root EBS volume is created with SSE-EBS encryption using the account's default AWS-managed key (default `false`). Volume size / type / IOPS are preserved from the AMI. |
+| `cleanup-on-start-failure` | Optional. Used only with the `start` mode. | When `true` (default), a runner that fails to bootstrap or register has its console output captured and is then terminated so the failed start doesn't leak a billing instance. Set `false` to leave the instance running for interactive debugging. <br><br> **Behavior change:** older versions left the instance running after a registration timeout; the default is now to terminate it. See [Troubleshooting a failed start](#troubleshooting-a-failed-start). |
 | `debug` | Optional. | When `true`, the action emits extra diagnostic output to the Actions log — inputs (secrets redacted), AWS SDK response metadata, and runner-registration poll details. Default `false`. |
 
 ### Environment variables
@@ -382,6 +409,39 @@ jobs:
 In [this discussion](https://github.com/machulav/ec2-github-runner/discussions/19), you can find feedback and examples from the users of the action.
 
 If you use this action in your workflow, feel free to add your story there as well 🙌
+
+## Troubleshooting a failed start
+
+When a runner fails to come up, the `start` step now diagnoses the failure itself instead of silently waiting out the registration timeout.
+
+### Fast-fail with a named step
+
+During bootstrap, the EC2 instance tags itself with its current phase in the `ec2-github-runner:bootstrap` tag as it advances through:
+
+`preparing` → `installing` → `creating-user` → `downloading` → `configuring` → `registered`
+
+If a phase aborts, the instance writes `failed:<step>` (e.g. `failed:downloading`) and the `start` step fails within one poll interval, naming the step — so you know immediately whether the problem was, say, the `yum install` (`installing`), the runner-tarball download or checksum (`downloading`), or `config.sh` registration (`configuring`), rather than waiting five minutes for a generic timeout.
+
+This phone-home tagging needs `ec2:CreateTags` on the instance's own IAM role (set via `iam-role-name`) — see the [permissions policy](#2-prepare-the-aws-access-credentials). It is best-effort: without `iam-role-name` or the permission, tagging is skipped and the action falls back to timeout-based detection with no error, and reads the tag with `ec2:DescribeTags`.
+
+### Console output on failure
+
+On any failed start — fast-fail **or** registration timeout — the action fetches the instance's serial console output (`ec2:GetConsoleOutput`), and prints the tail (last 200 lines) into a collapsible group in the Actions log. This is the cloud-init/bootstrap log you would previously have had to fetch by hand with `aws ec2 get-console-output --latest`. The GitHub runner registration token is redacted from the captured output.
+
+### Cleanup on failure
+
+By default (`cleanup-on-start-failure: true`), the instance is **terminated** after its console output is captured, so a failed start does not leave a billing instance running.
+
+> **Behavior change:** older versions left the instance running after a registration timeout. If you relied on that (for example, to SSH in and debug), set `cleanup-on-start-failure: false`. The action then leaves the instance running and prints its instance id along with ready-to-paste `get-console-output` and `terminate-instances` commands.
+
+```yml
+- name: Start EC2 runner
+  uses: machulav/ec2-github-runner@v2
+  with:
+    mode: start
+    # ... other inputs ...
+    cleanup-on-start-failure: false # keep the instance for interactive debugging
+```
 
 ## Self-hosted runner security with public repositories
 

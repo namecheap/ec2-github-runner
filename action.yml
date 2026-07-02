@@ -103,6 +103,19 @@ inputs:
       Passed through to RunInstances MetadataOptions.HttpTokens.
     required: false
     default: 'required'
+  cleanup-on-start-failure:
+    description: >-
+      Used only with the 'start' mode. When 'true' (default), if the
+      runner fails to bootstrap or register, the action captures the
+      instance's console output and then terminates the instance so a
+      failed start does not leak a billing instance. Set 'false' to
+      leave the instance running for interactive debugging — the action
+      prints its instance id and a ready-to-paste 'get-console-output'
+      command instead of terminating it.
+      NOTE: 'true' is a behavior change from older versions, which left
+      the instance running after a registration timeout.
+    required: false
+    default: 'true'
   debug:
     description: >-
       When 'true', the action emits extra diagnostic output to the

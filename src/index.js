@@ -19,6 +19,7 @@ const aws = require('./aws');
 const gh = require('./gh');
 const config = require('./config');
 const log = require('./log');
+const { waitForRunnerReady } = require('./wait');
 const core = require('@actions/core');
 
 // Write directly to the $GITHUB_OUTPUT file. The bundled @actions/core
@@ -44,7 +45,21 @@ async function start() {
     const ec2InstanceId = await aws.startEc2Instance(label, githubRegistrationToken);
     setOutput(label, ec2InstanceId);
     await aws.waitForInstanceRunning(ec2InstanceId);
-    await gh.waitForRunnerRegistered(label);
+
+    // Watch the bootstrap phone-home tag and GitHub registration together.
+    // On a bootstrap failure or registration timeout, capture the console
+    // output and (by default) terminate the instance so failed starts
+    // don't leak billing. The registration token is redacted from the
+    // captured output.
+    try {
+      await waitForRunnerReady({
+        getBootstrapStatus: () => aws.getBootstrapStatus(ec2InstanceId),
+        isRunnerOnline: () => gh.isRunnerOnline(label),
+      });
+    } catch (waitError) {
+      await aws.handleStartFailure(ec2InstanceId, { redactValues: [githubRegistrationToken] });
+      throw waitError;
+    }
     log.info('start', { label, instance_id: ec2InstanceId, outcome: 'registered' });
   } finally {
     core.endGroup();
