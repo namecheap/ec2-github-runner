@@ -538,6 +538,13 @@ By default (`cleanup-on-start-failure: true`), the instance is **terminated** af
     cleanup-on-start-failure: false # keep the instance for interactive debugging
 ```
 
+## Updating the pinned runner version
+
+The default `actions/runner` version is pinned (with SHA-256 checksums in `src/runner-checksums.js`) and bumped automatically:
+
+- **Automatic:** a weekly workflow (`.github/workflows/bump-runner.yml`) checks for a newer `actions/runner` release and, if found, opens a PR that updates the checksum table, `action.yml`, config, docs, and the rebuilt `dist/`. There is **no auto-merge** — review the PR (the body links the release notes and cites the checksum source) and merge it.
+- **Manual / hotfix:** run `node scripts/bump-runner.js <version>` (e.g. `node scripts/bump-runner.js 2.336.0`). It fetches the release checksums, updates every file, and rebuilds `dist/` (running `npm ci` before `npm run package` for you). Commit and open a PR.
+
 ## Self-hosted runner security with public repositories
 
 > We recommend that you do not use self-hosted runners with public repositories.
