@@ -63,43 +63,17 @@ async function removeRunner() {
   }
 }
 
-async function waitForRunnerRegistered(label) {
-  const timeoutMinutes = 5;
-  const retryIntervalSeconds = 10;
-  const quietPeriodSeconds = 30;
-  let waitSeconds = 0;
-
-  core.info(`Waiting ${quietPeriodSeconds}s for the AWS EC2 instance to be registered in GitHub as a new self-hosted runner`);
-  await new Promise(r => setTimeout(r, quietPeriodSeconds * 1000));
-  core.info(`Checking every ${retryIntervalSeconds}s if the GitHub self-hosted runner is registered`);
-
-  return new Promise((resolve, reject) => {
-    const interval = setInterval(async () => {
-      const runner = await getRunner(label);
-      log.debug('wait_for_runner_poll', { label, elapsed_s: waitSeconds, found: !!runner, status: runner ? runner.status : null });
-
-      if (waitSeconds > timeoutMinutes * 60) {
-        log.error('wait_for_runner', { label, timeout_minutes: timeoutMinutes });
-        core.error('GitHub self-hosted runner registration error');
-        clearInterval(interval);
-        reject(`A timeout of ${timeoutMinutes} minutes is exceeded. Your AWS EC2 instance was not able to register itself in GitHub as a new self-hosted runner.`);
-      }
-
-      if (runner && runner.status === 'online') {
-        log.info('wait_for_runner', { label, runner_id: runner.id, elapsed_s: waitSeconds });
-        core.info(`GitHub self-hosted runner ${runner.name} is registered and ready to use`);
-        clearInterval(interval);
-        resolve();
-      } else {
-        waitSeconds += retryIntervalSeconds;
-        core.info('Checking...');
-      }
-    }, retryIntervalSeconds * 1000);
-  });
+// True once the runner for `label` has registered with GitHub and reports
+// as online. Used as the success signal by the start action's wait loop
+// (see src/wait.js), polled alongside the instance's bootstrap tag.
+async function isRunnerOnline(label) {
+  const runner = await getRunner(label);
+  log.debug('runner_status', { label, found: !!runner, status: runner ? runner.status : null });
+  return !!(runner && runner.status === 'online');
 }
 
 module.exports = {
   getRegistrationToken,
   removeRunner,
-  waitForRunnerRegistered,
+  isRunnerOnline,
 };

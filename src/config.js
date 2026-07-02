@@ -19,6 +19,7 @@ class Config {
       runnerVersion: core.getInput('runner-version') || '2.335.1',
       httpTokens: core.getInput('http-tokens') || 'required',
       encryptEbs: core.getInput('encrypt-ebs') || 'false',
+      cleanupOnStartFailure: core.getInput('cleanup-on-start-failure') || 'true',
       debug: core.getInput('debug') || 'false',
     };
 
