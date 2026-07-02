@@ -11,6 +11,9 @@ class Config {
       ec2ImageId: core.getInput('ec2-image-id'),
       ec2InstanceType: core.getInput('ec2-instance-type'),
       subnetId: core.getInput('subnet-id'),
+      marketType: core.getInput('market-type') || 'on-demand',
+      spotFallback: core.getInput('spot-fallback') || 'on-demand',
+      spotMaxPrice: core.getInput('spot-max-price'),
       securityGroupId: core.getInput('security-group-id'),
       eipAllocationId: core.getInput('eip-allocation-id'),
       label: core.getInput('label'),
@@ -64,6 +67,7 @@ class Config {
         throw new Error(`Not all the required inputs for AMI search are provided for the 'start' mode`);
       }
       this.validateVolumeInputs();
+      this.validateMarketInputs();
     } else if (this.input.mode === 'stop') {
       if (!this.input.label || !this.input.ec2InstanceId) {
         throw new Error(`Not all the required inputs are provided for the 'stop' mode`);
@@ -103,6 +107,22 @@ class Config {
     }
     if (volumeThroughput && volumeType !== 'gp3') {
       throw new Error(`'volume-throughput' is only valid with 'volume-type' gp3`);
+    }
+  }
+
+  // Validate the spot/market inputs at config parse (fail fast before any
+  // AWS call). See src/aws.js buildMarketOptions/buildMarketPlan.
+  validateMarketInputs() {
+    const { marketType, spotFallback, spotMaxPrice } = this.input;
+    if (!['on-demand', 'spot'].includes(marketType)) {
+      throw new Error(`'market-type' must be one of: on-demand, spot`);
+    }
+    if (!['on-demand', 'fail'].includes(spotFallback)) {
+      throw new Error(`'spot-fallback' must be one of: on-demand, fail`);
+    }
+    // Positive decimal string, e.g. "0.05" or "1". Empty = AWS default cap.
+    if (spotMaxPrice && !(/^[0-9]+(\.[0-9]+)?$/.test(spotMaxPrice) && Number(spotMaxPrice) > 0)) {
+      throw new Error(`'spot-max-price' must be a positive decimal (USD/hour), e.g. 0.05`);
     }
   }
 

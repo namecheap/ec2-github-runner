@@ -310,6 +310,9 @@ Now you're ready to go!
 | `ec2-instance-type`                                                                                                                                                          | Required if you use the `start` mode.      | EC2 Instance Type. <br><br> Accepts a comma-separated **ordered fallback list** (e.g. `c7i.4xlarge,c6i.4xlarge,m7i.4xlarge`) — see [Capacity fallback](#capacity-fallback-across-azs-and-instance-types). A single value behaves as before.                                                                                             |
 | `subnet-id`                                                                                                                                                                  | Required if you use the `start` mode.      | VPC Subnet Id. <br><br> The subnet should belong to the same VPC as the specified security group. <br><br> Accepts a comma-separated **ordered fallback list** of subnets (typically across AZs), e.g. `subnet-aaa,subnet-bbb`.                                                                                                          |
 | `security-group-id`                                                                                                                                                          | Required if you use the `start` mode.      | EC2 Security Group Id. <br><br> The security group should belong to the same VPC as the specified subnet. <br><br> Only the outbound traffic for port 443 should be allowed. No inbound traffic is required.                                                                                                                          |
+| `market-type`                                                                                                                                                                | Optional. Used only with the `start` mode. | `on-demand` (default) or `spot`. Spot is typically 60–90% cheaper. See [Saving costs with spot](#saving-costs-with-spot).                                                                                                                                                                                                              |
+| `spot-fallback`                                                                                                                                                              | Optional. Used only with `start` + `market-type: spot`. | What to do when spot capacity is unavailable: `on-demand` (default) retries the launch on-demand; `fail` surfaces the error.                                                                                                                                                                                              |
+| `spot-max-price`                                                                                                                                                             | Optional. Used only with `start` + `market-type: spot`. | Max spot price in USD/hour (e.g. `0.05`). Empty (default) caps at the on-demand price.                                                                                                                                                                                                                                    |
 | `label`                                                                                                                                                                      | Required if you use the `stop` mode.       | Name of the unique label assigned to the runner. <br><br> The label is provided by the output of the action in the `start` mode. <br><br> The label is used to remove the runner from GitHub when the runner is not needed anymore.                                                                                                   |
 | `ec2-instance-id`                                                                                                                                                            | Required if you use the `stop` mode.       | EC2 Instance Id of the created runner. <br><br> The id is provided by the output of the action in the `start` mode. <br><br> The id is used to terminate the EC2 instance when the runner is not needed anymore.                                                                                                                      |
 | `iam-role-name`                                                                                                                                                              | Optional. Used only with the `start` mode. | IAM role name to attach to the created EC2 runner. <br><br> This allows the runner to have permissions to run additional actions within the AWS account, without having to manage additional GitHub secrets and AWS users. <br><br> Setting this requires additional AWS permissions for the role launching the instance (see above). |
@@ -347,6 +350,7 @@ We recommend using [aws-actions/configure-aws-credentials](https://github.com/aw
 | `ec2-instance-id`                                                                                                                                                            | EC2 Instance Id of the created runner. <br><br> The id is used to terminate the EC2 instance when the runner is not needed anymore.                                                                                                       |
 | `instance-type-used`                                                                                                                                                         | The EC2 instance type actually launched. With a [capacity-fallback](#capacity-fallback-across-azs-and-instance-types) list this may differ from your first choice.                                                                        |
 | `subnet-id-used`                                                                                                                                                             | The subnet the runner was actually launched into. With a capacity-fallback list this may differ from your first choice.                                                                                                                  |
+| `market-type-used`                                                                                                                                                           | The market the runner launched in: `spot` or `on-demand`. Differs from `market-type` when spot fell back to on-demand.                                                                                                                   |
 
 ### Example
 
@@ -420,6 +424,25 @@ jobs:
 In [this discussion](https://github.com/machulav/ec2-github-runner/discussions/19), you can find feedback and examples from the users of the action.
 
 If you use this action in your workflow, feel free to add your story there as well 🙌
+
+## Saving costs with spot
+
+CI runners are a textbook spot workload — short-lived, ephemeral (registered with `--ephemeral`), and restartable — and spot pricing is typically 60–90% below on-demand. Opt in with `market-type: spot`:
+
+```yml
+- name: Start EC2 runner
+  uses: namecheap/ec2-github-runner@v3
+  with:
+    mode: start
+    # ... other inputs ...
+    market-type: spot
+    spot-fallback: on-demand # default — retry on-demand if spot is unavailable
+    # spot-max-price: '0.05' # optional cap; default is the on-demand price
+```
+
+The request is a **one-time** spot request with `InstanceInterruptionBehavior: terminate`, so nothing persistent is left to leak and `stop` mode terminates it identically to an on-demand instance.
+
+**Interruption trade-off:** a spot runner can be reclaimed mid-job with a 2-minute warning. Because runners register as `--ephemeral`, an interrupted runner auto-deregisters — the job fails visibly and re-runs cleanly rather than hanging. Prefer spot for retry-safe jobs. If spot capacity is unavailable at launch, `spot-fallback: on-demand` (the default) transparently launches on-demand instead; set `spot-fallback: fail` for cost-strict pipelines that must never pay on-demand. The `market-type-used` output reports which market actually launched. Spot composes with the [capacity fallback](#capacity-fallback-across-azs-and-instance-types) below: the whole type × subnet chain is tried on spot first, then again on-demand.
 
 ## Capacity fallback across AZs and instance types
 

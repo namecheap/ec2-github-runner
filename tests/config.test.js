@@ -192,6 +192,39 @@ describe('Config — root volume inputs', () => {
   });
 });
 
+describe('Config — spot / market inputs', () => {
+  test('defaults to on-demand with default fallback', () => {
+    const config = loadConfig(startModeInputs);
+    expect(config.input.marketType).toBe('on-demand');
+    expect(config.input.spotFallback).toBe('on-demand');
+    expect(config.input.spotMaxPrice).toBe('');
+  });
+
+  test('accepts a valid spot configuration', () => {
+    const config = loadConfig({ ...startModeInputs, 'market-type': 'spot', 'spot-fallback': 'fail', 'spot-max-price': '0.05' });
+    expect(config.input.marketType).toBe('spot');
+    expect(config.input.spotFallback).toBe('fail');
+    expect(config.input.spotMaxPrice).toBe('0.05');
+  });
+
+  test('rejects an invalid market-type', () => {
+    expectValidationFailure({ ...startModeInputs, 'market-type': 'reserved' }, /'market-type' must be one of/);
+  });
+
+  test('rejects an invalid spot-fallback', () => {
+    expectValidationFailure({ ...startModeInputs, 'market-type': 'spot', 'spot-fallback': 'retry' }, /'spot-fallback' must be one of/);
+  });
+
+  test('rejects a non-numeric spot-max-price', () => {
+    expectValidationFailure({ ...startModeInputs, 'market-type': 'spot', 'spot-max-price': 'cheap' }, /'spot-max-price' must be a positive decimal/);
+  });
+
+  test('accepts a decimal spot-max-price', () => {
+    const config = loadConfig({ ...startModeInputs, 'market-type': 'spot', 'spot-max-price': '1.5' });
+    expect(config.input.spotMaxPrice).toBe('1.5');
+  });
+});
+
 describe('Config — max-lifetime-minutes input', () => {
   test('defaults to 360 when unset', () => {
     const config = loadConfig(startModeInputs);
