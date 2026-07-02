@@ -31,7 +31,7 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
       - name: Reap leaked runners
-        uses: namecheap/ec2-github-runner@v3
+        uses: namecheap/ec2-github-runner@v4
         with:
           mode: cleanup
           github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}

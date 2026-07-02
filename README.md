@@ -386,7 +386,7 @@ jobs:
           aws-region: ${{ secrets.AWS_REGION }}
       - name: Start EC2 runner
         id: start-ec2-runner
-        uses: namecheap/ec2-github-runner@v3
+        uses: namecheap/ec2-github-runner@v4
         with:
           mode: start
           github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
@@ -422,7 +422,7 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
       - name: Stop EC2 runner
-        uses: namecheap/ec2-github-runner@v3
+        uses: namecheap/ec2-github-runner@v4
         with:
           mode: stop
           github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
@@ -444,14 +444,14 @@ Set `reuse: stop` on **both** the start and stop steps:
 
 ```yml
 # start
-- uses: namecheap/ec2-github-runner@v3
+- uses: namecheap/ec2-github-runner@v4
   with:
     mode: start
     reuse: stop
     reuse-pool-tag: ci-medium   # instances are interchangeable within a pool tag
     # ... other inputs ...
 # stop
-- uses: namecheap/ec2-github-runner@v3
+- uses: namecheap/ec2-github-runner@v4
   with:
     mode: stop
     reuse: stop
@@ -485,7 +485,7 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
       - id: start
-        uses: namecheap/ec2-github-runner@v3
+        uses: namecheap/ec2-github-runner@v4
         with:
           mode: start
           github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
@@ -514,7 +514,7 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
-      - uses: namecheap/ec2-github-runner@v3
+      - uses: namecheap/ec2-github-runner@v4
         with:
           mode: stop
           github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
@@ -530,7 +530,7 @@ CI runners are a textbook spot workload — short-lived, ephemeral (registered w
 
 ```yml
 - name: Start EC2 runner
-  uses: namecheap/ec2-github-runner@v3
+  uses: namecheap/ec2-github-runner@v4
   with:
     mode: start
     # ... other inputs ...
@@ -549,7 +549,7 @@ A single `subnet-id` + `ec2-instance-type` means a single point of failure: when
 
 ```yml
 - name: Start EC2 runner
-  uses: namecheap/ec2-github-runner@v3
+  uses: namecheap/ec2-github-runner@v4
   with:
     mode: start
     # ... other inputs ...
@@ -570,7 +570,7 @@ Need an extra package or a different distro? Two escape hatches mean you never h
 Inject shell into the built-in (supported) bootstrap, run as root before the runner registers:
 
 ```yml
-- uses: namecheap/ec2-github-runner@v3
+- uses: namecheap/ec2-github-runner@v4
   with:
     mode: start
     # ... other inputs ...
@@ -586,7 +586,7 @@ It runs under `set -euo pipefail` and a failure is tagged `failed:pre-runner-scr
 Replace the bootstrap entirely with your own script (repo-relative path or inline string). The action substitutes documented placeholders and submits the result:
 
 ```yml
-- uses: namecheap/ec2-github-runner@v3
+- uses: namecheap/ec2-github-runner@v4
   with:
     mode: start
     # ... other inputs ...
@@ -612,7 +612,7 @@ Graviton instances (c7g/m7g/r7g/…) deliver ~20–40% better price/performance 
 
 ```yml
 - name: Start EC2 runner
-  uses: namecheap/ec2-github-runner@v3
+  uses: namecheap/ec2-github-runner@v4
   with:
     mode: start
     architecture: arm64
@@ -630,7 +630,7 @@ The runner inherits the AMI's root volume size — 8 GiB on Amazon Linux 2023. D
 
 ```yml
 - name: Start EC2 runner
-  uses: namecheap/ec2-github-runner@v3
+  uses: namecheap/ec2-github-runner@v4
   with:
     mode: start
     # ... other inputs ...
@@ -716,6 +716,10 @@ The default `actions/runner` version is pinned (with SHA-256 checksums in `src/r
 Please find more details about this security note on [GitHub documentation](https://docs.github.com/en/free-pro-team@latest/actions/hosting-your-own-runners/about-self-hosted-runners#self-hosted-runner-security-with-public-repositories).
 
 > ⚠️ **`reuse: stop` (warm pools) makes this worse.** With reuse, a runner's disk carries over between jobs, so a later job can read a previous job's residue (checked-out code, caches, credentials written to disk). Only use `reuse: stop` for a **single trusted repository's** CI. Never combine it with public-repo / untrusted-PR workloads. The default `reuse: terminate` gives every job a fresh instance.
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for release notes and breaking changes. Pin the moving major tag (`@v4`) for the latest release in that line, or a specific version (`@v4.0.0`) to pin exactly.
 
 ## License Summary
 
