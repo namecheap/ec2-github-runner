@@ -104739,6 +104739,61 @@ async function launchWithFallback(attempt, instanceTypes, subnetIds) {
   throw error;
 }
 
+// Build the RunInstances InstanceMarketOptions for a spot launch, or
+// undefined for on-demand (so on-demand params are byte-identical to
+// before spot support). One-time requests fit the launch-use-terminate
+// lifecycle — no persistent spot request is left to leak — and the
+// interruption behavior is terminate to match the ephemeral runner model.
+function buildMarketOptions(marketType, spotMaxPrice) {
+  if (marketType !== 'spot') {
+    return undefined;
+  }
+  const spotOptions = {
+    SpotInstanceType: 'one-time',
+    InstanceInterruptionBehavior: 'terminate',
+  };
+  if (spotMaxPrice) {
+    spotOptions.MaxPrice = String(spotMaxPrice);
+  }
+  return { MarketType: 'spot', SpotOptions: spotOptions };
+}
+
+// The ordered list of market types to try. on-demand launches use just
+// ['on-demand']; spot launches try spot first and (unless spot-fallback is
+// 'fail') fall back to on-demand once spot capacity is exhausted.
+function buildMarketPlan(marketType, spotFallback) {
+  if (marketType !== 'spot') {
+    return ['on-demand'];
+  }
+  return spotFallback === 'fail' ? ['spot'] : ['spot', 'on-demand'];
+}
+
+// Run the capacity-fallback chain once per market in the plan. Spot is
+// tried across the whole type × subnet matrix first; only when that matrix
+// is exhausted by capacity/price errors do we downgrade to the next market
+// (on-demand). A fatal error inside a market aborts immediately without
+// downgrading. attemptFor(marketType) returns the per-cell attempt fn.
+async function launchAcrossMarkets(attemptFor, marketPlan, instanceTypes, subnetIds, hooks = {}) {
+  for (let i = 0; i < marketPlan.length; i++) {
+    const marketType = marketPlan[i];
+    try {
+      const placement = await launchWithFallback(attemptFor(marketType), instanceTypes, subnetIds);
+      return { ...placement, marketType };
+    } catch (error) {
+      const hasNextMarket = i < marketPlan.length - 1;
+      if (error.capacityExhausted && hasNextMarket) {
+        if (hooks.onDowngrade) {
+          hooks.onDowngrade(marketType, marketPlan[i + 1], error);
+        }
+        continue;
+      }
+      throw error;
+    }
+  }
+  /* istanbul ignore next — marketPlan is always non-empty */
+  throw new Error('no market attempt was made');
+}
+
 // Instance tag the bootstrap script writes to phone home its progress.
 // The start action polls it to fail fast on cloud-init errors instead of
 // waiting out the full registration timeout. See buildUserData().
@@ -105144,8 +105199,14 @@ async function startEc2Instance(label, githubRegistrationToken) {
     label,
   });
 
-  const attempt = async (instanceType, subnetId) => {
+  // For each market, build the per-cell attempt that injects the
+  // instance type, subnet, and (for spot) the market options.
+  const attemptFor = (marketType) => async (instanceType, subnetId) => {
     const attemptParams = { ...params, InstanceType: instanceType, SubnetId: subnetId };
+    const marketOptions = buildMarketOptions(marketType, config.input.spotMaxPrice);
+    if (marketOptions) {
+      attemptParams.InstanceMarketOptions = marketOptions;
+    }
     const result = await withRetry(
       'run_instance',
       () => client.send(new RunInstancesCommand(attemptParams)),
@@ -105154,18 +105215,24 @@ async function startEc2Instance(label, githubRegistrationToken) {
     return result.Instances[0].InstanceId;
   };
 
+  const marketPlan = buildMarketPlan(config.input.marketType, config.input.spotFallback);
   let placement;
   const runStart = Date.now();
   try {
-    placement = await launchWithFallback(attempt, instanceTypes, subnetIds);
+    placement = await launchAcrossMarkets(attemptFor, marketPlan, instanceTypes, subnetIds, {
+      onDowngrade: (from, to, error) => {
+        log.warn('spot_fallback', { from, to, reason: error.message });
+        core.warning(`Spot capacity unavailable — falling back to ${to}`);
+      },
+    });
   } catch (error) {
     log.error('run_instance', { error: error.name, message: error.message });
     core.error('AWS EC2 instance starting error');
     throw error;
   }
   const ec2InstanceId = placement.instanceId;
-  log.info('run_instance', { instance_id: ec2InstanceId, instance_type: placement.instanceType, subnet_id: placement.subnetId, elapsed_ms: Date.now() - runStart });
-  core.info(`AWS EC2 instance ${ec2InstanceId} is started (type ${placement.instanceType}, subnet ${placement.subnetId})`);
+  log.info('run_instance', { instance_id: ec2InstanceId, instance_type: placement.instanceType, subnet_id: placement.subnetId, market_type: placement.marketType, elapsed_ms: Date.now() - runStart });
+  core.info(`AWS EC2 instance ${ec2InstanceId} is started (type ${placement.instanceType}, subnet ${placement.subnetId}, ${placement.marketType})`);
 
   if (config.input.eipAllocationId) {
     await waitForInstanceRunning(ec2InstanceId);
@@ -105182,7 +105249,7 @@ async function startEc2Instance(label, githubRegistrationToken) {
     }
   }
 
-  return { instanceId: ec2InstanceId, instanceType: placement.instanceType, subnetId: placement.subnetId };
+  return { instanceId: ec2InstanceId, instanceType: placement.instanceType, subnetId: placement.subnetId, marketType: placement.marketType };
 }
 
 async function terminateInstanceById(ec2InstanceId) {
@@ -105361,6 +105428,9 @@ module.exports = {
   // Exported for unit testing.
   classifyRunError,
   launchWithFallback,
+  launchAcrossMarkets,
+  buildMarketOptions,
+  buildMarketPlan,
   buildRootDeviceMapping,
   wantsRootDeviceMapping,
   buildVolumeOpts,
@@ -105536,6 +105606,9 @@ class Config {
       ec2ImageId: core.getInput('ec2-image-id'),
       ec2InstanceType: core.getInput('ec2-instance-type'),
       subnetId: core.getInput('subnet-id'),
+      marketType: core.getInput('market-type') || 'on-demand',
+      spotFallback: core.getInput('spot-fallback') || 'on-demand',
+      spotMaxPrice: core.getInput('spot-max-price'),
       securityGroupId: core.getInput('security-group-id'),
       eipAllocationId: core.getInput('eip-allocation-id'),
       label: core.getInput('label'),
@@ -105589,6 +105662,7 @@ class Config {
         throw new Error(`Not all the required inputs for AMI search are provided for the 'start' mode`);
       }
       this.validateVolumeInputs();
+      this.validateMarketInputs();
     } else if (this.input.mode === 'stop') {
       if (!this.input.label || !this.input.ec2InstanceId) {
         throw new Error(`Not all the required inputs are provided for the 'stop' mode`);
@@ -105628,6 +105702,22 @@ class Config {
     }
     if (volumeThroughput && volumeType !== 'gp3') {
       throw new Error(`'volume-throughput' is only valid with 'volume-type' gp3`);
+    }
+  }
+
+  // Validate the spot/market inputs at config parse (fail fast before any
+  // AWS call). See src/aws.js buildMarketOptions/buildMarketPlan.
+  validateMarketInputs() {
+    const { marketType, spotFallback, spotMaxPrice } = this.input;
+    if (!['on-demand', 'spot'].includes(marketType)) {
+      throw new Error(`'market-type' must be one of: on-demand, spot`);
+    }
+    if (!['on-demand', 'fail'].includes(spotFallback)) {
+      throw new Error(`'spot-fallback' must be one of: on-demand, fail`);
+    }
+    // Positive decimal string, e.g. "0.05" or "1". Empty = AWS default cap.
+    if (spotMaxPrice && !(/^[0-9]+(\.[0-9]+)?$/.test(spotMaxPrice) && Number(spotMaxPrice) > 0)) {
+      throw new Error(`'spot-max-price' must be a positive decimal (USD/hour), e.g. 0.05`);
     }
   }
 
@@ -110925,12 +111015,12 @@ const core = __nccwpck_require__(7484);
 // command; GitHub runners now surface that as a warning. Bypass the
 // legacy path — modern runners always set GITHUB_OUTPUT.
 function setOutput(label, placement) {
-  const { instanceId, instanceType, subnetId } = placement;
+  const { instanceId, instanceType, subnetId, marketType } = placement;
   const outputFile = process.env.GITHUB_OUTPUT;
   if (outputFile) {
     fs.appendFileSync(
       outputFile,
-      `label=${label}${os.EOL}ec2-instance-id=${instanceId}${os.EOL}instance-type-used=${instanceType}${os.EOL}subnet-id-used=${subnetId}${os.EOL}`,
+      `label=${label}${os.EOL}ec2-instance-id=${instanceId}${os.EOL}instance-type-used=${instanceType}${os.EOL}subnet-id-used=${subnetId}${os.EOL}market-type-used=${marketType}${os.EOL}`,
     );
     return;
   }
@@ -110938,6 +111028,7 @@ function setOutput(label, placement) {
   core.setOutput('ec2-instance-id', instanceId);
   core.setOutput('instance-type-used', instanceType);
   core.setOutput('subnet-id-used', subnetId);
+  core.setOutput('market-type-used', marketType);
 }
 
 async function start() {

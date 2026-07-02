@@ -99,6 +99,27 @@ inputs:
       this — opt in explicitly when you've verified the permissions.
     required: false
     default: 'false'
+  market-type:
+    description: >-
+      Used only with the 'start' mode. 'on-demand' (default) or 'spot'.
+      Spot instances are typically 60-90% cheaper and fit the ephemeral
+      runner model, but can be reclaimed mid-job (2-minute warning).
+    required: false
+    default: 'on-demand'
+  spot-fallback:
+    description: >-
+      Used only with the 'start' mode when market-type is 'spot'. What to
+      do when spot capacity is unavailable: 'on-demand' (default) retries
+      the launch as on-demand; 'fail' surfaces the error for cost-strict
+      pipelines.
+    required: false
+    default: 'on-demand'
+  spot-max-price:
+    description: >-
+      Used only with the 'start' mode when market-type is 'spot'. Optional
+      maximum spot price in USD/hour (e.g. '0.05'). Empty (default) uses the
+      on-demand price as the cap (AWS default).
+    required: false
   volume-size:
     description: >-
       Used only with the 'start' mode. Root EBS volume size in GiB. When
@@ -206,6 +227,10 @@ outputs:
     description: >-
       The subnet the runner was actually launched into (start mode). With a
       capacity-fallback list this may differ from the first choice.
+  market-type-used:
+    description: >-
+      The market the runner was actually launched in (start mode): 'spot' or
+      'on-demand'. Differs from market-type when spot fell back to on-demand.
 runs:
   using: node24
   main: ./dist/index.js

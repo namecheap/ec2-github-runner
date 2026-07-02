@@ -28,12 +28,12 @@ const core = require('@actions/core');
 // command; GitHub runners now surface that as a warning. Bypass the
 // legacy path — modern runners always set GITHUB_OUTPUT.
 function setOutput(label, placement) {
-  const { instanceId, instanceType, subnetId } = placement;
+  const { instanceId, instanceType, subnetId, marketType } = placement;
   const outputFile = process.env.GITHUB_OUTPUT;
   if (outputFile) {
     fs.appendFileSync(
       outputFile,
-      `label=${label}${os.EOL}ec2-instance-id=${instanceId}${os.EOL}instance-type-used=${instanceType}${os.EOL}subnet-id-used=${subnetId}${os.EOL}`,
+      `label=${label}${os.EOL}ec2-instance-id=${instanceId}${os.EOL}instance-type-used=${instanceType}${os.EOL}subnet-id-used=${subnetId}${os.EOL}market-type-used=${marketType}${os.EOL}`,
     );
     return;
   }
@@ -41,6 +41,7 @@ function setOutput(label, placement) {
   core.setOutput('ec2-instance-id', instanceId);
   core.setOutput('instance-type-used', instanceType);
   core.setOutput('subnet-id-used', subnetId);
+  core.setOutput('market-type-used', marketType);
 }
 
 async function start() {
