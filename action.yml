@@ -76,6 +76,39 @@ inputs:
       'ec2-instance-ids' output and a warning is logged.
     required: false
     default: 'false'
+  reuse:
+    description: >-
+      Instance lifecycle. 'terminate' (default) launches a fresh instance on
+      start and terminates it on stop. 'stop' enables warm pools: start
+      reuses a stopped pool instance (or cold-launches into the pool), and
+      stop stops the instance for reuse instead of terminating it. Set the
+      same value on both the start and stop steps.
+      WARNING: reused instances retain the previous job's disk state — safe
+      for a single trusted repo's CI, UNSAFE for public/untrusted-PR
+      workloads. See the security section in the README.
+    required: false
+    default: 'terminate'
+  reuse-pool-tag:
+    description: >-
+      Used with reuse:stop. Pool identity — instances are interchangeable
+      within a pool tag (default 'default'). Use distinct tags for distinct
+      instance shapes (e.g. 'ci-medium', 'ci-large').
+    required: false
+    default: 'default'
+  reuse-max-cycles:
+    description: >-
+      Used with reuse:stop. Recycle (terminate instead of stop) a pool
+      instance after it has served this many jobs, so state doesn't
+      accumulate forever (default 20).
+    required: false
+    default: '20'
+  reaper-stopped-max-age:
+    description: >-
+      Used with the 'cleanup' mode. Terminate stopped pool instances older
+      than this many minutes (default 1440 = 24h) so idle pools drain
+      instead of accruing EBS cost.
+    required: false
+    default: '1440'
   label:
     description: >-
       Name of the unique label assigned to the runner.

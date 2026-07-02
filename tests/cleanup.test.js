@@ -35,6 +35,16 @@ describe('decideReap — decision matrix', () => {
     const d = decideReap({ startedAtMs: minutesAgo(60) }, { id: 1, busy: false }, opts);
     expect(d).toMatchObject({ action: 'skip', reason: 'runner-idle-within-max-age' });
   });
+
+  test('drains a stopped pool instance older than stopped-max-age', () => {
+    const d = decideReap({ startedAtMs: minutesAgo(2000), state: 'stopped' }, null, { ...opts, stoppedMaxAgeMinutes: 1440 });
+    expect(d).toMatchObject({ action: 'reap', reason: 'stopped-past-max-age' });
+  });
+
+  test('keeps a stopped pool instance within stopped-max-age', () => {
+    const d = decideReap({ startedAtMs: minutesAgo(60), state: 'stopped' }, null, { ...opts, stoppedMaxAgeMinutes: 1440 });
+    expect(d).toMatchObject({ action: 'skip', reason: 'stopped-within-max-age' });
+  });
 });
 
 function fixtures() {
@@ -85,6 +95,27 @@ describe('runReaper', () => {
     expect(deregisterRunner).not.toHaveBeenCalled();
     expect(summary).toMatchObject({ examined: 5, reaped: 2, skipped: 3, dryRun: true });
     expect(summary.rows.filter((r) => r.action === 'reap').every((r) => r.performed === false)).toBe(true);
+  });
+
+  test('drains stopped instances without a GitHub runner lookup', async () => {
+    const instances = [
+      { instanceId: 'i-old', label: 'x', startedAtMs: minutesAgo(2000), state: 'stopped' },
+      { instanceId: 'i-fresh', label: 'y', startedAtMs: minutesAgo(30), state: 'stopped' },
+    ];
+    const terminateInstance = jest.fn().mockResolvedValue();
+    const getRunnerByLabel = jest.fn();
+
+    const summary = await runReaper({
+      listManagedInstances: () => Promise.resolve(instances),
+      getRunnerByLabel,
+      terminateInstance,
+      deregisterRunner: jest.fn(),
+      now: () => NOW,
+    }, { maxAgeMinutes: 120, stoppedMaxAgeMinutes: 1440, dryRun: false });
+
+    expect(terminateInstance.mock.calls.map((c) => c[0])).toEqual(['i-old']);
+    expect(getRunnerByLabel).not.toHaveBeenCalled(); // stopped instances skip the runner check
+    expect(summary).toMatchObject({ examined: 2, reaped: 1, skipped: 1 });
   });
 
   test('a termination failure is recorded and does not abort the sweep', async () => {

@@ -316,6 +316,10 @@ Now you're ready to go!
 | `label`                                                                                                                                                                      | Required if you use the `stop` mode.       | Name of the unique label assigned to the runner. <br><br> The label is provided by the output of the action in the `start` mode. <br><br> The label is used to remove the runner from GitHub when the runner is not needed anymore.                                                                                                   |
 | `count`                                                                                                                                                                      | Optional. Used only with the `start` mode. | Number of runner instances to launch behind the single shared label (default `1`). Enables matrix builds — see [Matrix builds](#matrix-builds-multiple-runners). |
 | `allow-partial`                                                                                                                                                              | Optional. Used only with the `start` mode (`count` > 1). | When `false` (default) the batch is all-or-nothing; when `true`, as few as 1 instance may launch, with the realized set in `ec2-instance-ids` and a warning. |
+| `reuse`                                                                                                                                                                       | Optional. Used with `start` + `stop`.      | `terminate` (default) or `stop`. `stop` enables [warm pools](#warm-pools-reuse-stop): reuse stopped instances for ~60% faster starts. Set the same value on both steps. **Unsafe for public/untrusted-PR repos** (disk state persists). |
+| `reuse-pool-tag`                                                                                                                                                             | Optional. Used with `reuse: stop`.         | Pool identity — instances are interchangeable within a tag (default `default`). Use distinct tags per instance shape. |
+| `reuse-max-cycles`                                                                                                                                                           | Optional. Used with `reuse: stop`.         | Recycle (terminate) a pool instance after it serves this many jobs (default `20`), so state doesn't accumulate forever. |
+| `reaper-stopped-max-age`                                                                                                                                                     | Optional. Used with the `cleanup` mode.    | Terminate stopped pool instances older than this many minutes (default `1440` = 24h) so idle pools drain. |
 | `ec2-instance-id`                                                                                                                                                            | Required for `stop` mode (or `ec2-instance-ids`). | EC2 Instance Id of the created runner. <br><br> The id is provided by the output of the action in the `start` mode. <br><br> The id is used to terminate the EC2 instance when the runner is not needed anymore.                                                                                                              |
 | `ec2-instance-ids`                                                                                                                                                          | Optional. Used with the `stop` mode.       | JSON array of instance ids to terminate, from the `ec2-instance-ids` output of a batched `start` (e.g. `["i-aaa","i-bbb"]`). Either this or `ec2-instance-id` is required to stop.                                                                                                                                                   |
 | `iam-role-name`                                                                                                                                                              | Optional. Used only with the `start` mode. | IAM role name to attach to the created EC2 runner. <br><br> This allows the runner to have permissions to run additional actions within the AWS account, without having to manage additional GitHub secrets and AWS users. <br><br> Setting this requires additional AWS permissions for the role launching the instance (see above). |
@@ -431,6 +435,37 @@ jobs:
 In [this discussion](https://github.com/machulav/ec2-github-runner/discussions/19), you can find feedback and examples from the users of the action.
 
 If you use this action in your workflow, feel free to add your story there as well 🙌
+
+## Warm pools (`reuse: stop`)
+
+Every cold start pays the full boot tax — instance launch + OS boot + `yum install` + runner download (~100 MB) + registration, typically 2–4 minutes. For lots of short jobs, boot time dominates wall-clock. Stopped EC2 instances restart in seconds-to-tens-of-seconds with their disk intact (bootstrap already done) and cost only EBS while stopped.
+
+Set `reuse: stop` on **both** the start and stop steps:
+
+```yml
+# start
+- uses: namecheap/ec2-github-runner@v3
+  with:
+    mode: start
+    reuse: stop
+    reuse-pool-tag: ci-medium   # instances are interchangeable within a pool tag
+    # ... other inputs ...
+# stop
+- uses: namecheap/ec2-github-runner@v3
+  with:
+    mode: stop
+    reuse: stop
+    label: ${{ needs.start-runner.outputs.label }}
+    ec2-instance-id: ${{ needs.start-runner.outputs.ec2-instance-id }}
+```
+
+- **Start** looks for a *stopped* instance with this action's tags + matching `reuse-pool-tag` + same instance type/arch; if found it `StartInstances` and the runner re-registers (a boot-time hook reads a fresh registration token from the instance's IMDS user-data — the token never lives in a readable tag). If the pool is empty, it cold-launches an instance that **joins the pool**. (Warm reuse applies when `count` is 1; batches cold-launch.)
+- **Stop** stops the instance instead of terminating it, so the next job reuses it.
+- **Hygiene**: `reuse-max-cycles` (default 20) recycles an instance after N jobs; `max-lifetime-minutes` bounds wall-clock age; the [`cleanup` reaper](#reaping-orphaned-runners-mode-cleanup) drains stopped instances older than `reaper-stopped-max-age`. Warm caches (e.g. Docker layers) are a feature; unbounded state is not — these keep pools from accreting cost.
+
+> ⚠️ **Security:** reuse means job N+1 runs on job N's disk. This is fine for a **single trusted repo's** CI but **unsafe for public repositories or untrusted pull requests** — see [the security section](#self-hosted-runner-security-with-public-repositories).
+
+Pool sizing: match the pool tag to a concurrency tier. A pool naturally grows to your peak concurrency (cold launches join it) and drains via the reaper when idle.
 
 ## Matrix builds (multiple runners)
 
@@ -679,6 +714,8 @@ The default `actions/runner` version is pinned (with SHA-256 checksums in `src/r
 > Forks of your public repository can potentially run dangerous code on your self-hosted runner machine by creating a pull request that executes the code in a workflow.
 
 Please find more details about this security note on [GitHub documentation](https://docs.github.com/en/free-pro-team@latest/actions/hosting-your-own-runners/about-self-hosted-runners#self-hosted-runner-security-with-public-repositories).
+
+> ⚠️ **`reuse: stop` (warm pools) makes this worse.** With reuse, a runner's disk carries over between jobs, so a later job can read a previous job's residue (checked-out code, caches, credentials written to disk). Only use `reuse: stop` for a **single trusted repository's** CI. Never combine it with public-repo / untrusted-PR workloads. The default `reuse: terminate` gives every job a fresh instance.
 
 ## License Summary
 

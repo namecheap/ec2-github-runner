@@ -104656,6 +104656,10 @@ const {
   GetConsoleOutputCommand,
   RunInstancesCommand,
   TerminateInstancesCommand,
+  StartInstancesCommand,
+  StopInstancesCommand,
+  CreateTagsCommand,
+  ModifyInstanceAttributeCommand,
   AssociateAddressCommand,
   waitUntilInstanceRunning,
 } = __nccwpck_require__(5193);
@@ -104825,6 +104829,29 @@ const REPO_TAG_KEY = 'ec2-github-runner:repository';
 const LABEL_TAG_KEY = 'ec2-github-runner:label';
 const STARTED_AT_TAG_KEY = 'ec2-github-runner:started-at';
 
+// Warm-pool tags (reuse: stop). `pool` marks a stop/start-reusable instance
+// and its interchangeability group; `cycles` counts how many jobs it has
+// served so it can be recycled at reuse-max-cycles.
+const POOL_TAG_KEY = 'ec2-github-runner:pool';
+const CYCLES_TAG_KEY = 'ec2-github-runner:cycles';
+
+// Shared bootstrap shell helpers, emitted into any shell that phones home:
+// derive instance identity from IMDSv2 and tag the bootstrap phase (best-
+// effort — needs ec2:CreateTags, degrades silently otherwise).
+const PHONE_HOME_HELPERS = [
+  'gh_runner_imds() {',
+  '  local token',
+  '  token=$(curl -fsS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 120" 2>/dev/null || true)',
+  '  curl -fsS -H "X-aws-ec2-metadata-token: $token" "http://169.254.169.254/latest/meta-data/$1" 2>/dev/null || true',
+  '}',
+  'GH_RUNNER_IID=$(gh_runner_imds instance-id)',
+  'GH_RUNNER_REGION=$(gh_runner_imds placement/region)',
+  'gh_runner_phone_home() {',
+  '  [ -n "$GH_RUNNER_IID" ] && [ -n "$GH_RUNNER_REGION" ] || return 0',
+  `  aws ec2 create-tags --region "$GH_RUNNER_REGION" --resources "$GH_RUNNER_IID" --tags "Key=${BOOTSTRAP_TAG_KEY},Value=$1" >/dev/null 2>&1 || true`,
+  '}',
+];
+
 // Console-output capture caps: keep the printed tail useful but bounded so a
 // runaway boot log can't flood the Actions run output.
 const CONSOLE_TAIL_LINES = 200;
@@ -104966,6 +104993,125 @@ function buildRootDeviceMapping(image, opts = {}) {
   return [{ DeviceName: rootDev, Ebs: ebs }];
 }
 
+// Warm-pool (reuse: stop) bootstrap. The expensive setup — deps, runner
+// user, runner tarball download+verify — runs once (idempotent). A per-boot
+// systemd service (gh-runner.service) then re-registers and runs a fresh
+// ephemeral job on EVERY boot, reading the current registration token /
+// label / repo from the instance's IMDS user-data. On a warm start the
+// action rewrites that user-data (ModifyInstanceAttribute) with a fresh
+// token, so the token never lives in a readable tag and is only exposed via
+// IMDS to the instance itself. See warmStartInstance().
+function buildReusableUserData({ runnerVersion, owner, repo, label, githubRegistrationToken, shaX64, shaArm64, ttlLines, preRunnerLines }) {
+  const repoUrl = `https://github.com/${owner}/${repo}`;
+
+  // The per-boot re-registration script, written to /opt on the instance.
+  // Reads the current job params from IMDS user-data (rewritten per warm
+  // start), clears any prior registration, then config + run as the runner
+  // user. Phone-home tags configuring/registered/failed for diagnostics.
+  const registerScript = [
+    '#!/bin/bash',
+    'set -euo pipefail',
+    ...PHONE_HOME_HELPERS,
+    'IMDS_TOKEN=$(curl -fsS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 120" 2>/dev/null || true)',
+    'UD=$(curl -fsS -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" "http://169.254.169.254/latest/user-data" 2>/dev/null || true)',
+    'GH_TOKEN=$(printf \'%s\\n\' "$UD" | sed -n "s/^GH_TOKEN=\'\\(.*\\)\'$/\\1/p" | head -n1)',
+    'GH_LABEL=$(printf \'%s\\n\' "$UD" | sed -n "s/^GH_LABEL=\'\\(.*\\)\'$/\\1/p" | head -n1)',
+    'GH_REPO_URL=$(printf \'%s\\n\' "$UD" | sed -n "s#^GH_REPO_URL=\'\\(.*\\)\'$#\\1#p" | head -n1)',
+    'cd /home/runner/actions-runner',
+    'rm -f .runner .credentials .credentials_rsaparams',
+    'GH_RUNNER_STEP=configuring',
+    'trap \'gh_runner_phone_home "failed:${GH_RUNNER_STEP}"\' ERR',
+    'gh_runner_phone_home configuring',
+    'sudo -u runner -H env DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 ./config.sh --url "$GH_REPO_URL" --token "$GH_TOKEN" --labels "$GH_LABEL" --ephemeral --unattended --disableupdate',
+    'GH_RUNNER_STEP=registered',
+    'gh_runner_phone_home registered',
+    'sudo -u runner -H ./run.sh',
+  ];
+
+  const serviceUnit = [
+    '[Unit]',
+    'Description=GitHub Actions ephemeral runner (warm pool)',
+    'After=network-online.target',
+    'Wants=network-online.target',
+    '[Service]',
+    'Type=simple',
+    'ExecStart=/opt/gh-runner-register.sh',
+    '[Install]',
+    'WantedBy=multi-user.target',
+  ];
+
+  return [
+    '#!/bin/bash',
+    'set -euo pipefail',
+    '',
+    '# --- ec2-github-runner: warm-pool bootstrap (reuse: stop) -----------',
+    ...PHONE_HOME_HELPERS,
+    'GH_RUNNER_STEP=preparing',
+    "trap 'gh_runner_phone_home \"failed:${GH_RUNNER_STEP}\"' ERR",
+    '',
+    ...ttlLines,
+    '# One-time setup (idempotent across warm restarts).',
+    'GH_RUNNER_STEP=preparing',
+    'gh_runner_phone_home preparing',
+    'mount -o remount,size=1G /tmp || true',
+    'GH_RUNNER_STEP=installing',
+    'gh_runner_phone_home installing',
+    'yum install -y libicu make sudo',
+    'GH_RUNNER_STEP=creating-user',
+    'gh_runner_phone_home creating-user',
+    'if ! id runner >/dev/null 2>&1; then',
+    '  useradd -m -s /bin/bash runner',
+    'fi',
+    '',
+    ...preRunnerLines,
+    '# Download + verify the runner once (skipped if already present).',
+    'GH_RUNNER_STEP=downloading',
+    'gh_runner_phone_home downloading',
+    'trap - ERR',
+    "sudo -u runner -H bash <<'RUNNER_DOWNLOAD'",
+    'set -euo pipefail',
+    'cd "$HOME"',
+    'mkdir -p actions-runner && cd actions-runner',
+    'if [ ! -x ./run.sh ]; then',
+    '  case "$(uname -m)" in',
+    '    aarch64) RUNNER_ARCH="arm64" ;;',
+    '    amd64|x86_64) RUNNER_ARCH="x64" ;;',
+    '    *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;;',
+    '  esac',
+    `  RUNNER_VERSION="${runnerVersion}"`,
+    '  TARBALL="actions-runner-linux-${RUNNER_ARCH}-${RUNNER_VERSION}.tar.gz"',
+    '  BASE="https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}"',
+    '  curl -fsSLo "$TARBALL" "$BASE/$TARBALL"',
+    '  case "$RUNNER_ARCH" in',
+    `    x64) EXPECTED_SHA="${shaX64}" ;;`,
+    `    arm64) EXPECTED_SHA="${shaArm64}" ;;`,
+    '    *) echo "no checksum for arch $RUNNER_ARCH" >&2; exit 1 ;;',
+    '  esac',
+    '  echo "$EXPECTED_SHA  $TARBALL" | sha256sum -c -',
+    '  tar xzf "$TARBALL"',
+    'fi',
+    'RUNNER_DOWNLOAD',
+    '',
+    '# Current job params. Rewritten per warm start via ModifyInstanceAttribute;',
+    '# the per-boot service reads them back from IMDS user-data.',
+    `GH_TOKEN='${githubRegistrationToken}'`,
+    `GH_LABEL='${label}'`,
+    `GH_REPO_URL='${repoUrl}'`,
+    '',
+    '# Per-boot re-registration script + systemd service.',
+    "cat >/opt/gh-runner-register.sh <<'GH_REGISTER_SCRIPT'",
+    ...registerScript,
+    'GH_REGISTER_SCRIPT',
+    'chmod +x /opt/gh-runner-register.sh',
+    "cat >/etc/systemd/system/gh-runner.service <<'GH_RUNNER_SERVICE'",
+    ...serviceUnit,
+    'GH_RUNNER_SERVICE',
+    'systemctl daemon-reload',
+    'systemctl enable --now gh-runner.service',
+    '',
+  ].join('\n');
+}
+
 // Build the cloud-init user-data bootstrap script.
 //
 // Design notes (fix-forward after ec2-github-runner#18/#19/#20):
@@ -104996,7 +105142,7 @@ function buildRootDeviceMapping(image, opts = {}) {
 //   registration timeout. Tagging is best-effort: it needs
 //   `ec2:CreateTags` on the instance profile and degrades to
 //   timeout-only detection when absent (every write is `|| true`).
-function buildUserData({ runnerVersion, owner, repo, label, githubRegistrationToken, shaX64, shaArm64, maxLifetimeMinutes, preRunnerScript }) {
+function buildUserData({ runnerVersion, owner, repo, label, githubRegistrationToken, shaX64, shaArm64, maxLifetimeMinutes, preRunnerScript, reuse }) {
   // User-supplied pre-runner-script (#46): injected verbatim into the outer
   // (root) shell before runner configuration, under the same set -euo
   // pipefail + ERR trap, tagged as its own phase so a failure surfaces as
@@ -105027,29 +105173,19 @@ function buildUserData({ runnerVersion, owner, repo, label, githubRegistrationTo
     ]
     : [];
 
-  // Shared shell helpers, emitted verbatim into both the outer (root) and
-  // inner (runner-user) shells — each shell re-derives instance identity
-  // from IMDS so it can keep phoning home independently.
-  const phoneHomeHelpers = [
-    'gh_runner_imds() {',
-    '  local token',
-    '  token=$(curl -fsS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 120" 2>/dev/null || true)',
-    '  curl -fsS -H "X-aws-ec2-metadata-token: $token" "http://169.254.169.254/latest/meta-data/$1" 2>/dev/null || true',
-    '}',
-    'GH_RUNNER_IID=$(gh_runner_imds instance-id)',
-    'GH_RUNNER_REGION=$(gh_runner_imds placement/region)',
-    'gh_runner_phone_home() {',
-    '  [ -n "$GH_RUNNER_IID" ] && [ -n "$GH_RUNNER_REGION" ] || return 0',
-    `  aws ec2 create-tags --region "$GH_RUNNER_REGION" --resources "$GH_RUNNER_IID" --tags "Key=${BOOTSTRAP_TAG_KEY},Value=$1" >/dev/null 2>&1 || true`,
-    '}',
-  ];
+  // reuse: stop needs a per-boot re-registration hook instead of a one-shot
+  // config+run — the runner is set up once but re-registers on every warm
+  // start. Kept in a separate builder so the default path stays untouched.
+  if (reuse === 'stop') {
+    return buildReusableUserData({ runnerVersion, owner, repo, label, githubRegistrationToken, shaX64, shaArm64, ttlLines, preRunnerLines });
+  }
 
   return [
     '#!/bin/bash',
     'set -euo pipefail',
     '',
     '# --- ec2-github-runner: bootstrap diagnostics (phone-home) ----------',
-    ...phoneHomeHelpers,
+    ...PHONE_HOME_HELPERS,
     'GH_RUNNER_STEP=preparing',
     "trap 'gh_runner_phone_home \"failed:${GH_RUNNER_STEP}\"' ERR",
     '',
@@ -105076,7 +105212,7 @@ function buildUserData({ runnerVersion, owner, repo, label, githubRegistrationTo
     'trap - ERR',
     "sudo -u runner -H bash <<'RUNNER_BOOTSTRAP'",
     'set -euo pipefail',
-    ...phoneHomeHelpers,
+    ...PHONE_HOME_HELPERS,
     'GH_RUNNER_STEP=downloading',
     "trap 'gh_runner_phone_home \"failed:${GH_RUNNER_STEP}\"' ERR",
     'gh_runner_phone_home downloading',
@@ -105130,7 +105266,7 @@ function buildTagSpecifications(label, startedAtIso) {
   const owner = config.githubContext.owner;
   const repo = config.githubContext.repo;
   const userTags = config.input.awsResourceTags || [];
-  const signatureKeys = new Set([MANAGED_TAG_KEY, REPO_TAG_KEY, LABEL_TAG_KEY, STARTED_AT_TAG_KEY]);
+  const signatureKeys = new Set([MANAGED_TAG_KEY, REPO_TAG_KEY, LABEL_TAG_KEY, STARTED_AT_TAG_KEY, POOL_TAG_KEY, CYCLES_TAG_KEY]);
   const tags = [
     ...userTags.filter((t) => !signatureKeys.has(t.Key)),
     { Key: MANAGED_TAG_KEY, Value: 'true' },
@@ -105138,10 +105274,38 @@ function buildTagSpecifications(label, startedAtIso) {
     { Key: LABEL_TAG_KEY, Value: label },
     { Key: STARTED_AT_TAG_KEY, Value: startedAtIso },
   ];
+  // Warm-pool membership so a cold-launched instance can be reused later.
+  if (config.input.reuse === 'stop') {
+    tags.push({ Key: POOL_TAG_KEY, Value: config.input.reusePoolTag });
+    tags.push({ Key: CYCLES_TAG_KEY, Value: '0' });
+  }
   return [
     { ResourceType: 'instance', Tags: tags },
     { ResourceType: 'volume', Tags: tags },
   ];
+}
+
+// Build the warm-pool (reuse: stop) user-data for a fresh token/label —
+// used by the warm-start path to rewrite a stopped instance's user-data.
+function buildReuseUserData(label, githubRegistrationToken) {
+  const runnerVersion = config.input.runnerVersion;
+  const shaX64 = checksums.lookup('x64', runnerVersion);
+  const shaArm64 = checksums.lookup('arm64', runnerVersion);
+  if (!shaX64 || !shaArm64) {
+    throw new Error(`No SHA-256 entry in src/runner-checksums.js for runner-version ${runnerVersion}.`);
+  }
+  return buildUserData({
+    runnerVersion,
+    owner: config.githubContext.owner,
+    repo: config.githubContext.repo,
+    label,
+    githubRegistrationToken,
+    shaX64,
+    shaArm64,
+    maxLifetimeMinutes: config.input.maxLifetimeMinutes,
+    preRunnerScript: config.input.preRunnerScript,
+    reuse: 'stop',
+  });
 }
 
 // Resolve the user-data-template input: a repo-relative path is read from
@@ -105191,6 +105355,7 @@ async function startEc2Instance(label, githubRegistrationToken) {
     userData = buildUserData({
       runnerVersion, owner, repo, label, githubRegistrationToken, shaX64, shaArm64, maxLifetimeMinutes,
       preRunnerScript: config.input.preRunnerScript,
+      reuse: config.input.reuse,
     });
   }
   assertUserDataSize(userData);
@@ -105494,13 +105659,13 @@ async function handleStartFailure(ec2InstanceIds, opts = {}) {
 // returned, so a near-miss tag set can never be reaped). Each result
 // carries the parsed started-at (ms; falls back to LaunchTime) and label
 // the reaper needs to make its decision.
-async function listManagedInstances(repo) {
+async function listManagedInstances(repo, states = ['pending', 'running']) {
   const client = ec2Client();
   const resp = await client.send(new DescribeInstancesCommand({
     Filters: [
       { Name: `tag:${MANAGED_TAG_KEY}`, Values: ['true'] },
       { Name: `tag:${REPO_TAG_KEY}`, Values: [repo] },
-      { Name: 'instance-state-name', Values: ['pending', 'running'] },
+      { Name: 'instance-state-name', Values: states },
     ],
   }));
 
@@ -105523,10 +105688,104 @@ async function listManagedInstances(repo) {
         instanceId: instance.InstanceId,
         label: tags[LABEL_TAG_KEY] || null,
         startedAtMs,
+        state: instance.State ? instance.State.Name : null,
       });
     }
   }
   return instances;
+}
+
+// Find one stopped, reusable pool instance matching the full signature +
+// pool tag + instance type + architecture (all required; near-misses are
+// never returned — the safety guarantee). Returns { instanceId, subnetId }
+// or null when the pool is empty.
+async function findStoppedPoolInstance({ repo, poolTag, instanceType, architecture }) {
+  const client = ec2Client();
+  const amiArch = AMI_ARCH_BY_INPUT[architecture];
+  const resp = await client.send(new DescribeInstancesCommand({
+    Filters: [
+      { Name: `tag:${MANAGED_TAG_KEY}`, Values: ['true'] },
+      { Name: `tag:${REPO_TAG_KEY}`, Values: [repo] },
+      { Name: `tag:${POOL_TAG_KEY}`, Values: [poolTag] },
+      { Name: 'instance-state-name', Values: ['stopped'] },
+      { Name: 'instance-type', Values: [instanceType] },
+    ],
+  }));
+
+  for (const reservation of resp.Reservations || []) {
+    for (const instance of reservation.Instances || []) {
+      const tags = {};
+      for (const tag of instance.Tags || []) {
+        tags[tag.Key] = tag.Value;
+      }
+      // Strict client-side re-validation of the full signature.
+      if (tags[MANAGED_TAG_KEY] !== 'true' || tags[REPO_TAG_KEY] !== repo || tags[POOL_TAG_KEY] !== poolTag) {
+        continue;
+      }
+      if (instance.InstanceType !== instanceType || (amiArch && instance.Architecture && instance.Architecture !== amiArch)) {
+        continue;
+      }
+      return { instanceId: instance.InstanceId, subnetId: instance.SubnetId };
+    }
+  }
+  return null;
+}
+
+// Warm-start a stopped pool instance: rewrite its user-data with the fresh
+// registration token/label (so the per-boot service re-registers), update
+// its label + started-at tags, then StartInstances.
+async function warmStartInstance(instanceId, { userData, label }) {
+  const client = ec2Client();
+  await client.send(new ModifyInstanceAttributeCommand({
+    InstanceId: instanceId,
+    UserData: { Value: Buffer.from(userData).toString('base64') },
+  }));
+  await client.send(new CreateTagsCommand({
+    Resources: [instanceId],
+    Tags: [
+      { Key: LABEL_TAG_KEY, Value: label },
+      { Key: STARTED_AT_TAG_KEY, Value: new Date().toISOString() },
+    ],
+  }));
+  await withRetry('start_instance', () => client.send(new StartInstancesCommand({ InstanceIds: [instanceId] })));
+  log.info('warm_start', { instance_id: instanceId, label });
+  core.info(`Reused warm-pool EC2 instance ${instanceId}`);
+}
+
+// Stop (not terminate) an instance so it can be reused from the pool.
+async function stopInstanceById(instanceId) {
+  const client = ec2Client();
+  await withRetry('stop_instance', () => client.send(new StopInstancesCommand({ InstanceIds: [instanceId] })));
+  log.info('stop_instance', { instance_id: instanceId });
+  core.info(`AWS EC2 instance ${instanceId} is stopped (warm pool)`);
+}
+
+// Read the reuse-cycle counter tag for an instance (0 when absent).
+async function getInstanceCycles(instanceId) {
+  const client = ec2Client();
+  try {
+    const resp = await client.send(new DescribeTagsCommand({
+      Filters: [
+        { Name: 'resource-id', Values: [instanceId] },
+        { Name: 'key', Values: [CYCLES_TAG_KEY] },
+      ],
+    }));
+    const tag = (resp.Tags || []).find((t) => t.Key === CYCLES_TAG_KEY);
+    const n = tag ? parseInt(tag.Value, 10) : 0;
+    return Number.isFinite(n) ? n : 0;
+  } catch (error) {
+    log.debug('instance_cycles', { instance_id: instanceId, error: error.name, message: error.message });
+    return 0;
+  }
+}
+
+// Set the reuse-cycle counter tag.
+async function setInstanceCycles(instanceId, cycles) {
+  const client = ec2Client();
+  await client.send(new CreateTagsCommand({
+    Resources: [instanceId],
+    Tags: [{ Key: CYCLES_TAG_KEY, Value: String(cycles) }],
+  }));
 }
 
 module.exports = {
@@ -105538,6 +105797,12 @@ module.exports = {
   getConsoleOutputTail,
   handleStartFailure,
   listManagedInstances,
+  findStoppedPoolInstance,
+  warmStartInstance,
+  stopInstanceById,
+  getInstanceCycles,
+  setInstanceCycles,
+  buildReuseUserData,
   // Exported for unit testing.
   classifyRunError,
   matchAmiArchitecture,
@@ -105556,6 +105821,8 @@ module.exports = {
   REPO_TAG_KEY,
   LABEL_TAG_KEY,
   STARTED_AT_TAG_KEY,
+  POOL_TAG_KEY,
+  CYCLES_TAG_KEY,
 };
 
 
@@ -105576,14 +105843,25 @@ const REAP_GRACE_MINUTES = 15;
 // GitHub runner (or null if none is registered). Pure function — no I/O —
 // so the full decision matrix is unit-testable.
 //
+//   stopped, older than stopped-max-age -> reap  (drain idle warm pool)
+//   stopped, within stopped-max-age      -> skip
 //   within grace period         -> skip  (protect in-flight starts)
 //   no runner registered        -> reap  (leaked instance)
 //   runner busy                 -> skip  (job in progress, any age)
 //   runner idle, older than max -> reap + deregister
 //   runner idle, within max age  -> skip
 function decideReap(instance, runner, opts) {
-  const { nowMs, maxAgeMinutes, graceMinutes } = opts;
+  const { nowMs, maxAgeMinutes, graceMinutes, stoppedMaxAgeMinutes } = opts;
   const ageMinutes = instance.startedAtMs != null ? (nowMs - instance.startedAtMs) / 60000 : Infinity;
+
+  // Stopped warm-pool instances: drain those older than the stopped max-age
+  // so pools don't accrete EBS cost forever. No runner check — it's stopped.
+  if (instance.state === 'stopped') {
+    if (stoppedMaxAgeMinutes != null && ageMinutes > stoppedMaxAgeMinutes) {
+      return { action: 'reap', reason: 'stopped-past-max-age', deregister: false };
+    }
+    return { action: 'skip', reason: 'stopped-within-max-age', deregister: false };
+  }
 
   if (ageMinutes < graceMinutes) {
     return { action: 'skip', reason: 'within-grace-period', deregister: false };
@@ -105615,6 +105893,7 @@ async function runReaper(deps, opts = {}) {
   const { listManagedInstances, getRunnerByLabel, terminateInstance, deregisterRunner, now } = deps;
   const maxAgeMinutes = opts.maxAgeMinutes;
   const graceMinutes = opts.graceMinutes ?? REAP_GRACE_MINUTES;
+  const stoppedMaxAgeMinutes = opts.stoppedMaxAgeMinutes;
   const dryRun = !!opts.dryRun;
 
   const instances = await listManagedInstances();
@@ -105624,8 +105903,9 @@ async function runReaper(deps, opts = {}) {
   let skipped = 0;
 
   for (const instance of instances) {
-    const runner = instance.label ? await getRunnerByLabel(instance.label) : null;
-    const decision = decideReap(instance, runner, { nowMs, maxAgeMinutes, graceMinutes });
+    // Stopped instances have no live runner to cross-check.
+    const runner = (instance.state !== 'stopped' && instance.label) ? await getRunnerByLabel(instance.label) : null;
+    const decision = decideReap(instance, runner, { nowMs, maxAgeMinutes, graceMinutes, stoppedMaxAgeMinutes });
     const row = {
       instanceId: instance.instanceId,
       label: instance.label,
@@ -105733,6 +106013,10 @@ class Config {
       allowPartial: core.getInput('allow-partial') || 'false',
       preRunnerScript: core.getInput('pre-runner-script'),
       userDataTemplate: core.getInput('user-data-template'),
+      reuse: core.getInput('reuse') || 'terminate',
+      reusePoolTag: core.getInput('reuse-pool-tag') || 'default',
+      reuseMaxCycles: core.getInput('reuse-max-cycles') || '20',
+      reaperStoppedMaxAge: core.getInput('reaper-stopped-max-age') || '1440',
       iamRoleName: core.getInput('iam-role-name'),
       runnerVersion: core.getInput('runner-version') || '2.335.1',
       architecture: core.getInput('architecture') || 'x64',
@@ -105787,12 +106071,14 @@ class Config {
       this.validateArchitectureInputs();
       this.validateCountInput();
       this.validateBootstrapInputs();
+      this.validateReuseInputs();
     } else if (this.input.mode === 'stop') {
       // A stop needs the shared label plus at least one instance id — either
       // the compat scalar or the JSON array from a batched start.
       if (!this.input.label || (!this.input.ec2InstanceId && !(this.input.ec2InstanceIds && this.input.ec2InstanceIds.length))) {
         throw new Error(`Not all the required inputs are provided for the 'stop' mode`);
       }
+      this.validateReuseInputs();
     } else if (this.input.mode === 'cleanup') {
       // The reaper needs only the github-token (validated above) and
       // operates on the current repository; max-age-minutes and dry-run
@@ -105870,6 +106156,16 @@ class Config {
   validateBootstrapInputs() {
     if (this.input.userDataTemplate && this.input.preRunnerScript) {
       throw new Error(`'user-data-template' and 'pre-runner-script' are mutually exclusive`);
+    }
+  }
+
+  // Validate the warm-pool reuse inputs (start + stop).
+  validateReuseInputs() {
+    if (!['terminate', 'stop'].includes(this.input.reuse)) {
+      throw new Error(`'reuse' must be one of: terminate, stop`);
+    }
+    if (!(/^[0-9]+$/.test(this.input.reuseMaxCycles) && Number(this.input.reuseMaxCycles) >= 1)) {
+      throw new Error(`'reuse-max-cycles' must be a positive integer`);
     }
   }
 
@@ -111277,6 +111573,7 @@ const config = __nccwpck_require__(1283);
 const log = __nccwpck_require__(7223);
 const { waitForRunnerReady } = __nccwpck_require__(8644);
 const { runReaper, renderCleanupSummary, REAP_GRACE_MINUTES } = __nccwpck_require__(5541);
+const { parseCsv } = __nccwpck_require__(5804);
 const core = __nccwpck_require__(7484);
 
 // Write directly to the $GITHUB_OUTPUT file. The bundled @actions/core
@@ -111304,13 +111601,49 @@ function setOutput(label, placement) {
   core.setOutput('market-type-used', marketType);
 }
 
+// Warm-pool fast path: reuse a stopped pool instance (count 1 only). Returns
+// a placement, or null to fall back to a cold launch (empty pool or a failed
+// start — the cold launch then joins the pool).
+async function tryWarmStart(label, githubRegistrationToken) {
+  const repo = `${config.githubContext.owner}/${config.githubContext.repo}`;
+  const instanceType = parseCsv(config.input.ec2InstanceType)[0];
+  const pool = await aws.findStoppedPoolInstance({
+    repo,
+    poolTag: config.input.reusePoolTag,
+    instanceType,
+    architecture: config.input.architecture,
+  });
+  if (!pool) {
+    log.info('warm_start', { outcome: 'pool_empty', pool: config.input.reusePoolTag });
+    return null;
+  }
+  try {
+    const userData = aws.buildReuseUserData(label, githubRegistrationToken);
+    await aws.warmStartInstance(pool.instanceId, { userData, label });
+    return { instanceIds: [pool.instanceId], instanceType, subnetId: pool.subnetId, marketType: 'reused' };
+  } catch (error) {
+    log.warn('warm_start', { instance_id: pool.instanceId, error: error.name, message: error.message });
+    core.warning(`Warm start of ${pool.instanceId} failed (${error.message}); cold-launching instead`);
+    return null;
+  }
+}
+
 async function start() {
   core.startGroup('start-runner');
   try {
     log.debug('start_inputs', config.input); // sanitized inside log.js
     const label = config.generateUniqueLabel();
     const githubRegistrationToken = await gh.getRegistrationToken();
-    const placement = await aws.startEc2Instance(label, githubRegistrationToken);
+
+    // Warm pool: reuse a stopped instance when reuse:stop and count 1;
+    // otherwise (or on empty pool / failed reuse) cold-launch.
+    let placement = null;
+    if (config.input.reuse === 'stop' && Number(config.input.count) === 1) {
+      placement = await tryWarmStart(label, githubRegistrationToken);
+    }
+    if (!placement) {
+      placement = await aws.startEc2Instance(label, githubRegistrationToken);
+    }
     const instanceIds = placement.instanceIds;
     setOutput(label, placement);
     for (const id of instanceIds) {
@@ -111350,14 +111683,29 @@ async function stop() {
       ? config.input.ec2InstanceIds
       : [config.input.ec2InstanceId];
 
+    const reuse = config.input.reuse === 'stop';
+    const maxCycles = Number(config.input.reuseMaxCycles);
     for (const id of instanceIds) {
       try {
-        await aws.terminateInstanceById(id);
+        if (reuse) {
+          // Warm pool: stop for reuse until the instance has served
+          // reuse-max-cycles jobs, then recycle it (terminate).
+          const cycles = await aws.getInstanceCycles(id);
+          if (cycles + 1 >= maxCycles) {
+            log.info('reuse', { instance_id: id, action: 'terminate', reason: 'max_cycles_reached', cycles });
+            await aws.terminateInstanceById(id);
+          } else {
+            await aws.setInstanceCycles(id, cycles + 1);
+            await aws.stopInstanceById(id);
+          }
+        } else {
+          await aws.terminateInstanceById(id);
+        }
       } catch (error) {
         if (error.name && error.name.includes('NotFound')) {
           log.info('terminate_instance', { instance_id: id, skipped: true, reason: 'already_gone' });
         } else {
-          failures.push({ step: `terminate_instance:${id}`, error: error.name, message: error.message });
+          failures.push({ step: `${reuse ? 'stop' : 'terminate'}_instance:${id}`, error: error.name, message: error.message });
         }
       }
     }
@@ -111404,7 +111752,8 @@ async function cleanup() {
 
     const summary = await runReaper(
       {
-        listManagedInstances: () => aws.listManagedInstances(repo),
+        // Include stopped instances so idle warm-pool instances are drained.
+        listManagedInstances: () => aws.listManagedInstances(repo, ['pending', 'running', 'stopped']),
         getRunnerByLabel: (label) => gh.getRunner(label),
         terminateInstance: (id) => aws.terminateInstanceById(id),
         deregisterRunner: (runnerId) => gh.deregisterRunner(runnerId),
@@ -111413,6 +111762,7 @@ async function cleanup() {
       {
         maxAgeMinutes: Number(config.input.maxAgeMinutes),
         graceMinutes: REAP_GRACE_MINUTES,
+        stoppedMaxAgeMinutes: Number(config.input.reaperStoppedMaxAge),
         dryRun,
       },
     );

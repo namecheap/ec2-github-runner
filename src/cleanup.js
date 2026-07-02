@@ -10,14 +10,25 @@ const REAP_GRACE_MINUTES = 15;
 // GitHub runner (or null if none is registered). Pure function — no I/O —
 // so the full decision matrix is unit-testable.
 //
+//   stopped, older than stopped-max-age -> reap  (drain idle warm pool)
+//   stopped, within stopped-max-age      -> skip
 //   within grace period         -> skip  (protect in-flight starts)
 //   no runner registered        -> reap  (leaked instance)
 //   runner busy                 -> skip  (job in progress, any age)
 //   runner idle, older than max -> reap + deregister
 //   runner idle, within max age  -> skip
 function decideReap(instance, runner, opts) {
-  const { nowMs, maxAgeMinutes, graceMinutes } = opts;
+  const { nowMs, maxAgeMinutes, graceMinutes, stoppedMaxAgeMinutes } = opts;
   const ageMinutes = instance.startedAtMs != null ? (nowMs - instance.startedAtMs) / 60000 : Infinity;
+
+  // Stopped warm-pool instances: drain those older than the stopped max-age
+  // so pools don't accrete EBS cost forever. No runner check — it's stopped.
+  if (instance.state === 'stopped') {
+    if (stoppedMaxAgeMinutes != null && ageMinutes > stoppedMaxAgeMinutes) {
+      return { action: 'reap', reason: 'stopped-past-max-age', deregister: false };
+    }
+    return { action: 'skip', reason: 'stopped-within-max-age', deregister: false };
+  }
 
   if (ageMinutes < graceMinutes) {
     return { action: 'skip', reason: 'within-grace-period', deregister: false };
@@ -49,6 +60,7 @@ async function runReaper(deps, opts = {}) {
   const { listManagedInstances, getRunnerByLabel, terminateInstance, deregisterRunner, now } = deps;
   const maxAgeMinutes = opts.maxAgeMinutes;
   const graceMinutes = opts.graceMinutes ?? REAP_GRACE_MINUTES;
+  const stoppedMaxAgeMinutes = opts.stoppedMaxAgeMinutes;
   const dryRun = !!opts.dryRun;
 
   const instances = await listManagedInstances();
@@ -58,8 +70,9 @@ async function runReaper(deps, opts = {}) {
   let skipped = 0;
 
   for (const instance of instances) {
-    const runner = instance.label ? await getRunnerByLabel(instance.label) : null;
-    const decision = decideReap(instance, runner, { nowMs, maxAgeMinutes, graceMinutes });
+    // Stopped instances have no live runner to cross-check.
+    const runner = (instance.state !== 'stopped' && instance.label) ? await getRunnerByLabel(instance.label) : null;
+    const decision = decideReap(instance, runner, { nowMs, maxAgeMinutes, graceMinutes, stoppedMaxAgeMinutes });
     const row = {
       instanceId: instance.instanceId,
       label: instance.label,
