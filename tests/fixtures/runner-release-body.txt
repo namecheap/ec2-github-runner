@@ -1,0 +1,12 @@
+## What's Changed
+
+This release contains a number of bug fixes and improvements.
+
+## SHA-256 Checksums
+
+The SHA-256 checksums for the packages included in this build are shown below:
+
+- Actions Runner (OSX x64): <!-- BEGIN SHA osx-x64 -->1111111111111111111111111111111111111111111111111111111111111111<!-- END SHA osx-x64 -->
+- Actions Runner (Linux x64): <!-- BEGIN SHA linux-x64 -->aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa<!-- END SHA linux-x64 -->
+- Actions Runner (Linux ARM64): <!-- BEGIN SHA linux-arm64 -->bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb<!-- END SHA linux-arm64 -->
+- Actions Runner (Win x64): <!-- BEGIN SHA win-x64 -->2222222222222222222222222222222222222222222222222222222222222222<!-- END SHA win-x64 -->

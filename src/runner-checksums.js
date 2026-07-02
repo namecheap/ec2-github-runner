@@ -9,12 +9,16 @@
 // at boot time means an api.github.com round trip on every runner
 // start and hits the unauth rate limit quickly at org scale.
 //
-// Maintenance: whenever the `runner-version` default bumps in
-// action.yml, add the matching hashes here from the release body at
-// https://github.com/actions/runner/releases/tag/v<version>. The
-// `verify-runner-url` CI job cross-checks every entry against the
-// live release body on every PR, so a drift between this table and
-// upstream is caught at code-review time, not at runtime.
+// Maintenance: this table is bumped automatically. The weekly
+// `Bump actions/runner` workflow (.github/workflows/bump-runner.yml)
+// opens a PR via `scripts/bump-runner.js`, which adds the matching
+// hashes here from the release body at
+// https://github.com/actions/runner/releases/tag/v<version> and
+// rebuilds dist. For a manual/hotfix bump, run
+// `node scripts/bump-runner.js <version>` (no auto-merge — a human
+// reviews the PR). The `verify-runner-url` CI job cross-checks every
+// entry against the live release body on every PR, so a drift between
+// this table and upstream is caught at code-review time, not at runtime.
 //
 // Sources:
 //   https://github.com/actions/runner/releases/tag/v2.335.1
