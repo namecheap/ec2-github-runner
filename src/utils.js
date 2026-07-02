@@ -17,6 +17,18 @@ function sortByCreationDate(data) {
   });
 }
 
+// Parse a comma-separated input into a trimmed, non-empty list. A single
+// value yields a one-element list, so callers behave identically whether the
+// user passed "subnet-a" or "subnet-a,subnet-b". Empty/whitespace entries
+// (e.g. trailing commas) are dropped.
+function parseCsv(value) {
+  if (!value) {
+    return [];
+  }
+  return value.split(',').map((v) => v.trim()).filter((v) => v.length > 0);
+}
+
 module.exports = {
   sortByCreationDate,
+  parseCsv,
 }
