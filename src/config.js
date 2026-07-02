@@ -22,6 +22,8 @@ class Config {
       ec2InstanceIds: core.getInput('ec2-instance-ids') ? JSON.parse(core.getInput('ec2-instance-ids')) : null,
       count: core.getInput('count') || '1',
       allowPartial: core.getInput('allow-partial') || 'false',
+      preRunnerScript: core.getInput('pre-runner-script'),
+      userDataTemplate: core.getInput('user-data-template'),
       iamRoleName: core.getInput('iam-role-name'),
       runnerVersion: core.getInput('runner-version') || '2.335.1',
       architecture: core.getInput('architecture') || 'x64',
@@ -75,6 +77,7 @@ class Config {
       this.validateMarketInputs();
       this.validateArchitectureInputs();
       this.validateCountInput();
+      this.validateBootstrapInputs();
     } else if (this.input.mode === 'stop') {
       // A stop needs the shared label plus at least one instance id — either
       // the compat scalar or the JSON array from a batched start.
@@ -150,6 +153,14 @@ class Config {
     }
     if (types.length > 0 && !arches.includes(arch)) {
       throw new Error(`'ec2-instance-type' (${types.join(', ')}) looks like ${arches[0]} but 'architecture' is '${arch}'`);
+    }
+  }
+
+  // The two bootstrap-extension inputs are mutually exclusive: pre-runner-
+  // script augments the built-in bootstrap, user-data-template replaces it.
+  validateBootstrapInputs() {
+    if (this.input.userDataTemplate && this.input.preRunnerScript) {
+      throw new Error(`'user-data-template' and 'pre-runner-script' are mutually exclusive`);
     }
   }
 

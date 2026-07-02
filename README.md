@@ -12,7 +12,7 @@ And all this automatically as a part of your GitHub Actions workflow.
 >
 > The bootstrap script that this action injects as EC2 `user-data` is hardcoded to use `yum`, `useradd`, `sudo`, `bash`, and a `tmpfs` `/tmp`. That means the AMI you pass via `ec2-image-id` **must** be a yum-based distribution — Amazon Linux 2023 (the tested baseline), Amazon Linux 2, or a RHEL-family image (RHEL / CentOS Stream / Rocky / Alma) whose `/tmp` is mounted as tmpfs.
 >
-> **Debian, Ubuntu, Alpine, and any other non-yum distributions are not supported.** If you launch this action against such an AMI, the EC2 instance will boot but the runner bootstrap will fail. The action now surfaces this quickly: it fails fast naming the failing step and prints the instance's console output (see [Troubleshooting a failed start](#troubleshooting-a-failed-start)). Cross-distro support is not on the roadmap — if you need it, fork and replace the `userData` bootstrap in `src/aws.js`.
+> **The built-in bootstrap targets yum-based Linux (Amazon Linux 2023) only.** Launching the built-in bootstrap against a non-yum AMI (Debian, Ubuntu, Alpine, …) fails — the action surfaces this fast, naming the failing step and printing the console output (see [Troubleshooting a failed start](#troubleshooting-a-failed-start)). You **don't need to fork** for other distros or extra setup: use [`pre-runner-script`](#custom-bootstrap-pre-runner-script--user-data-template) to inject steps into the built-in bootstrap, or [`user-data-template`](#custom-bootstrap-pre-runner-script--user-data-template) to replace it entirely (an Ubuntu example ships in [`examples/user-data/`](examples/user-data/)). Custom templates are unsupported by design — the boundary *is* the feature.
 
 ![GitHub Actions self-hosted EC2 runner](docs/images/github-actions-runner.gif)
 
@@ -323,6 +323,8 @@ Now you're ready to go!
 | `eip-allocation-id` | Optional. Used only with the `start` mode. | Allocation Id of an Elastic IP to associate with the runner instance once it is running. |
 | `runner-version` | Optional. Used only with the `start` mode. | Version of the `actions/runner` binary to download and register (default `2.335.1`). <br><br> Must have a matching entry in `src/runner-checksums.js`; the action verifies the downloaded tarball's SHA-256 against that table before extraction. |
 | `architecture` | Optional. Used only with the `start` mode. | Runner CPU architecture: `x64` (default) or `arm64` (Graviton). Must match the AMI (validated at start). All types in an `ec2-instance-type` fallback list must share this arch. See [Running on Graviton (arm64)](#running-on-graviton-arm64). |
+| `pre-runner-script` | Optional. Used only with the `start` mode. | Shell snippet run as root by the built-in bootstrap **before** runner config (install docker, mount caches, add certs). Fail-fast, tagged `failed:pre-runner-script`. Mutually exclusive with `user-data-template`. See [Custom bootstrap](#custom-bootstrap-pre-runner-script--user-data-template). |
+| `user-data-template` | Optional. Used only with the `start` mode. | Full bootstrap override — a repo-relative file path or inline string with `{{PLACEHOLDERS}}`. Replaces the built-in bootstrap (unsupported by design). Mutually exclusive with `pre-runner-script`. See [Custom bootstrap](#custom-bootstrap-pre-runner-script--user-data-template). |
 | `http-tokens` | Optional. Used only with the `start` mode. | Instance Metadata Service (IMDS) token mode (default `required`). <br><br> - `required` — IMDSv2 only; mitigates SSRF-style credential theft. <br> - `optional` — also allows IMDSv1; set only if a workload on the runner needs it. |
 | `encrypt-ebs` | Optional. Used only with the `start` mode. | When `true`, the root EBS volume is created with SSE-EBS encryption using the account's default AWS-managed key (default `false`). Volume size / type / IOPS are preserved from the AMI unless overridden by the `volume-*` inputs below. |
 | `volume-size` | Optional. Used only with the `start` mode. | Root EBS volume size in GiB. Omitted = AMI default (Amazon Linux 2023: 8 GiB). Must be ≥ the AMI snapshot size. See [Disk space for Docker workloads](#disk-space-for-docker-workloads). |
@@ -523,6 +525,51 @@ A single `subnet-id` + `ec2-instance-type` means a single point of failure: when
 **Order:** for each instance type, every subnet/AZ is tried before downgrading to the next type (placement is cheaper than a hardware change). On an insufficient-capacity error the action advances to the next cell; **non-capacity errors** (invalid AMI, auth, or a quota like `InstanceLimitExceeded`) fail immediately so a misconfiguration doesn't burn through the whole matrix. Transient API errors are retried within each cell. Each failed placement logs a warning line (type, subnet, error code); full exhaustion fails with a summary of every attempt.
 
 The `instance-type-used` and `subnet-id-used` outputs report what actually launched. Single values keep the original single-attempt behavior.
+
+## Custom bootstrap (`pre-runner-script` / `user-data-template`)
+
+Need an extra package or a different distro? Two escape hatches mean you never have to fork.
+
+### `pre-runner-script` — the 80% case
+
+Inject shell into the built-in (supported) bootstrap, run as root before the runner registers:
+
+```yml
+- uses: namecheap/ec2-github-runner@v3
+  with:
+    mode: start
+    # ... other inputs ...
+    pre-runner-script: |
+      yum install -y docker
+      systemctl start docker
+```
+
+It runs under `set -euo pipefail` and a failure is tagged `failed:pre-runner-script`, so it shows up in the [fast-fail diagnostics](#troubleshooting-a-failed-start) like any other phase.
+
+### `user-data-template` — full control
+
+Replace the bootstrap entirely with your own script (repo-relative path or inline string). The action substitutes documented placeholders and submits the result:
+
+```yml
+- uses: namecheap/ec2-github-runner@v3
+  with:
+    mode: start
+    # ... other inputs ...
+    user-data-template: ./examples/user-data/ubuntu.sh.tpl
+```
+
+| Placeholder | Value |
+| --- | --- |
+| `{{RUNNER_VERSION}}` | Pinned `actions/runner` version |
+| `{{RUNNER_CHECKSUM_X64}}` / `{{RUNNER_CHECKSUM_ARM64}}` | Tarball SHA-256 per arch |
+| `{{REGISTRATION_TOKEN}}` | Ephemeral registration token (secret) |
+| `{{REPO_URL}}` | `https://github.com/<owner>/<repo>` |
+| `{{LABEL}}` | The unique runner label |
+| `{{TTL_MINUTES}}` | `max-lifetime-minutes` (`0` = disabled) |
+
+Unknown `{{...}}` tokens fail the run (typo protection); the rendered payload must stay under the EC2 16 KB limit.
+
+**Support boundary:** the built-in yum bootstrap is the only *supported* path. With a custom template, the action renders your placeholders and gives you the diagnostics tooling — but the script is yours. See [`examples/user-data/`](examples/user-data/) (an Ubuntu 24.04 template ships there as a community-maintained starting point). The two inputs are mutually exclusive.
 
 ## Running on Graviton (arm64)
 

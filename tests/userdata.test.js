@@ -103,4 +103,21 @@ describe('buildUserData', () => {
     const ud = buildUserData(args);
     expect(ud).not.toContain('shutdown -h');
   });
+
+  test('injects a pre-runner-script with its own phase tag, before the runner-user handoff', () => {
+    const ud = buildUserData({ ...args, preRunnerScript: 'yum install -y docker\nsystemctl start docker' });
+    expect(ud).toContain('GH_RUNNER_STEP=pre-runner-script');
+    expect(ud).toContain('gh_runner_phone_home pre-runner-script');
+    expect(ud).toContain('yum install -y docker');
+    expect(ud).toContain('systemctl start docker');
+    // Runs as root before dropping to the runner user.
+    expect(ud.indexOf('GH_RUNNER_STEP=pre-runner-script')).toBeLessThan(ud.indexOf("sudo -u runner -H bash <<'RUNNER_BOOTSTRAP'"));
+  });
+
+  test('omits the pre-runner-script phase entirely when not provided (default byte-identical)', () => {
+    const ud = buildUserData(args);
+    expect(ud).not.toContain('pre-runner-script');
+    // whitespace-only script is treated as absent
+    expect(buildUserData({ ...args, preRunnerScript: '   \n  ' })).not.toContain('pre-runner-script');
+  });
 });

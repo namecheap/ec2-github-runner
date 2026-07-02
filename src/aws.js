@@ -9,11 +9,13 @@ const {
   AssociateAddressCommand,
   waitUntilInstanceRunning,
 } = require('@aws-sdk/client-ec2');
+const fs = require('fs');
 const core = require('@actions/core');
 const config = require('./config');
 const log = require('./log');
 const { withRetry } = require('./retry');
 const { sortByCreationDate, parseCsv } = require('./utils');
+const { renderUserDataTemplate, assertUserDataSize } = require('./template');
 const checksums = require('./runner-checksums');
 
 // RunInstances error classification for the capacity-fallback chain.
@@ -344,7 +346,21 @@ function buildRootDeviceMapping(image, opts = {}) {
 //   registration timeout. Tagging is best-effort: it needs
 //   `ec2:CreateTags` on the instance profile and degrades to
 //   timeout-only detection when absent (every write is `|| true`).
-function buildUserData({ runnerVersion, owner, repo, label, githubRegistrationToken, shaX64, shaArm64, maxLifetimeMinutes }) {
+function buildUserData({ runnerVersion, owner, repo, label, githubRegistrationToken, shaX64, shaArm64, maxLifetimeMinutes, preRunnerScript }) {
+  // User-supplied pre-runner-script (#46): injected verbatim into the outer
+  // (root) shell before runner configuration, under the same set -euo
+  // pipefail + ERR trap, tagged as its own phase so a failure surfaces as
+  // failed:pre-runner-script.
+  const preRunnerLines = preRunnerScript && preRunnerScript.trim()
+    ? [
+      '# User-supplied pre-runner-script (runs as root before runner config).',
+      'GH_RUNNER_STEP=pre-runner-script',
+      'gh_runner_phone_home pre-runner-script',
+      ...preRunnerScript.replace(/\r\n/g, '\n').split('\n'),
+      '',
+    ]
+    : [];
+
   // TTL self-destruct (#42): arm a shutdown timer as an absolute upper
   // bound on instance lifetime. Combined with
   // InstanceInitiatedShutdownBehavior: terminate on RunInstances (set in
@@ -403,6 +419,7 @@ function buildUserData({ runnerVersion, owner, repo, label, githubRegistrationTo
     '  useradd -m -s /bin/bash runner',
     'fi',
     '',
+    ...preRunnerLines,
     '# The runner-user shell owns the download/configure/register phases and',
     '# reports them itself; drop the outer ERR trap so it does not overwrite',
     '# the inner shell\'s more specific failed:<step> tag.',
@@ -477,6 +494,15 @@ function buildTagSpecifications(label, startedAtIso) {
   ];
 }
 
+// Resolve the user-data-template input: a repo-relative path is read from
+// disk; anything else is treated as an inline template string.
+function resolveUserDataTemplate(templateInput) {
+  if (fs.existsSync(templateInput)) {
+    return fs.readFileSync(templateInput, 'utf8');
+  }
+  return templateInput;
+}
+
 async function startEc2Instance(label, githubRegistrationToken) {
   const client = ec2Client();
 
@@ -494,7 +520,30 @@ async function startEc2Instance(label, githubRegistrationToken) {
   }
 
   const maxLifetimeMinutes = config.input.maxLifetimeMinutes;
-  const userData = buildUserData({ runnerVersion, owner, repo, label, githubRegistrationToken, shaX64, shaArm64, maxLifetimeMinutes });
+
+  // Bootstrap source (#46): a full user-data-template override renders the
+  // documented placeholders; otherwise the built-in yum bootstrap is used,
+  // optionally with an injected pre-runner-script. Either way the rendered
+  // payload is size-checked against the EC2 16 KB limit.
+  let userData;
+  if (config.input.userDataTemplate) {
+    const template = resolveUserDataTemplate(config.input.userDataTemplate);
+    userData = renderUserDataTemplate(template, {
+      RUNNER_VERSION: runnerVersion,
+      RUNNER_CHECKSUM_X64: shaX64,
+      RUNNER_CHECKSUM_ARM64: shaArm64,
+      REGISTRATION_TOKEN: githubRegistrationToken,
+      REPO_URL: `https://github.com/${owner}/${repo}`,
+      LABEL: label,
+      TTL_MINUTES: maxLifetimeMinutes,
+    });
+  } else {
+    userData = buildUserData({
+      runnerVersion, owner, repo, label, githubRegistrationToken, shaX64, shaArm64, maxLifetimeMinutes,
+      preRunnerScript: config.input.preRunnerScript,
+    });
+  }
+  assertUserDataSize(userData);
 
   const resolved = await resolveImage(client);
   config.input.ec2ImageId = resolved.id;
