@@ -1,4 +1,23 @@
-const { sortByCreationDate } = require('../src/utils');
+const { sortByCreationDate, parseCsv } = require('../src/utils');
+
+describe('parseCsv', () => {
+  test('splits and trims a comma-separated list', () => {
+    expect(parseCsv('a, b ,c')).toEqual(['a', 'b', 'c']);
+  });
+
+  test('returns a one-element list for a single value (byte-identical path)', () => {
+    expect(parseCsv('subnet-a')).toEqual(['subnet-a']);
+  });
+
+  test('drops empty entries from trailing/double commas', () => {
+    expect(parseCsv('a,,b,')).toEqual(['a', 'b']);
+  });
+
+  test('returns an empty array for empty / undefined input', () => {
+    expect(parseCsv('')).toEqual([]);
+    expect(parseCsv(undefined)).toEqual([]);
+  });
+});
 
 describe('sortByCreationDate', () => {
   test('sorts images by CreationDate descending (newest first)', () => {

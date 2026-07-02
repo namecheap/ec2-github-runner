@@ -27,14 +27,20 @@ const core = require('@actions/core');
 // v1.2.6 still emits the deprecated '::set-output name=X::Y' workflow
 // command; GitHub runners now surface that as a warning. Bypass the
 // legacy path — modern runners always set GITHUB_OUTPUT.
-function setOutput(label, ec2InstanceId) {
+function setOutput(label, placement) {
+  const { instanceId, instanceType, subnetId } = placement;
   const outputFile = process.env.GITHUB_OUTPUT;
   if (outputFile) {
-    fs.appendFileSync(outputFile, `label=${label}${os.EOL}ec2-instance-id=${ec2InstanceId}${os.EOL}`);
+    fs.appendFileSync(
+      outputFile,
+      `label=${label}${os.EOL}ec2-instance-id=${instanceId}${os.EOL}instance-type-used=${instanceType}${os.EOL}subnet-id-used=${subnetId}${os.EOL}`,
+    );
     return;
   }
   core.setOutput('label', label);
-  core.setOutput('ec2-instance-id', ec2InstanceId);
+  core.setOutput('ec2-instance-id', instanceId);
+  core.setOutput('instance-type-used', instanceType);
+  core.setOutput('subnet-id-used', subnetId);
 }
 
 async function start() {
@@ -43,8 +49,9 @@ async function start() {
     log.debug('start_inputs', config.input); // sanitized inside log.js
     const label = config.generateUniqueLabel();
     const githubRegistrationToken = await gh.getRegistrationToken();
-    const ec2InstanceId = await aws.startEc2Instance(label, githubRegistrationToken);
-    setOutput(label, ec2InstanceId);
+    const placement = await aws.startEc2Instance(label, githubRegistrationToken);
+    const ec2InstanceId = placement.instanceId;
+    setOutput(label, placement);
     await aws.waitForInstanceRunning(ec2InstanceId);
 
     // Watch the bootstrap phone-home tag and GitHub registration together.
@@ -61,7 +68,7 @@ async function start() {
       await aws.handleStartFailure(ec2InstanceId, { redactValues: [githubRegistrationToken] });
       throw waitError;
     }
-    log.info('start', { label, instance_id: ec2InstanceId, outcome: 'registered' });
+    log.info('start', { label, instance_id: ec2InstanceId, instance_type: placement.instanceType, subnet_id: placement.subnetId, outcome: 'registered' });
   } finally {
     core.endGroup();
   }

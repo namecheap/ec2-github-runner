@@ -11,6 +11,10 @@ async function withRetry(step, fn, opts = {}) {
   const attempts = opts.attempts || 3;
   const baseMs = opts.baseMs || 2000;
   const maxMs = opts.maxMs || 10000;
+  // Optional predicate — when it returns false the error is re-thrown
+  // immediately without further retries. Defaults to retrying everything,
+  // preserving the original behavior for existing callers.
+  const shouldRetry = opts.shouldRetry || (() => true);
 
   let lastError;
   for (let i = 1; i <= attempts; i++) {
@@ -18,6 +22,9 @@ async function withRetry(step, fn, opts = {}) {
       return await fn();
     } catch (error) {
       lastError = error;
+      if (!shouldRetry(error)) {
+        throw error;
+      }
       if (i === attempts) {
         log.error(`${step}_retry`, {
           attempt: i,

@@ -40,13 +40,18 @@ inputs:
     required: false
   ec2-instance-type:
     description: >-
-      EC2 Instance Type. 
-      This input is required if you use the 'start' mode.
+      EC2 Instance Type. This input is required if you use the 'start' mode.
+      Accepts a comma-separated ordered fallback list (e.g.
+      'c7i.4xlarge,c6i.4xlarge,m7i.4xlarge'): on an insufficient-capacity
+      error the action tries the next type. A single value behaves as before.
     required: false
   subnet-id:
     description: >-
       VPC Subnet Id. The subnet should belong to the same VPC as the specified security group.
       This input is required if you use the 'start' mode.
+      Accepts a comma-separated ordered fallback list of subnets (typically
+      in different AZs, e.g. 'subnet-aaa,subnet-bbb'): the action exhausts
+      all subnets for an instance type before moving to the next type.
     required: false
   security-group-id:
     description: >-
@@ -193,6 +198,14 @@ outputs:
     description: >-
       EC2 Instance Id of the created runner.
       The id is used to terminate the EC2 instance when the runner is not needed anymore.
+  instance-type-used:
+    description: >-
+      The EC2 instance type that was actually launched (start mode). With a
+      capacity-fallback list this may differ from the first choice.
+  subnet-id-used:
+    description: >-
+      The subnet the runner was actually launched into (start mode). With a
+      capacity-fallback list this may differ from the first choice.
 runs:
   using: node24
   main: ./dist/index.js

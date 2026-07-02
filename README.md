@@ -307,8 +307,8 @@ Now you're ready to go!
 | `ec2-image-id`                                                                                                                                                               | Required for `start` mode, unless `ec2-image-filters` is set.      | EC2 Image Id (AMI). <br><br> The new runner will be launched from this image. <br><br> Only **yum-based** AMIs are supported (Amazon Linux 2023 tested; AL2 / RHEL-family in principle). See the [Supported operating systems](#on-demand-self-hosted-aws-ec2-runner-for-github-actions) notice at the top of this README.                                                                                                                                                                                           |
 | `ec2-image-filters` | Optional. Used only with the `start` mode. | Stringified JSON array of EC2 `DescribeImages` filters used to look up the AMI when `ec2-image-id` is not provided. <br><br> Example: `[{"Name": "name", "Values": ["al2023-ami-*-x86_64"]}]`. The most recently created matching image is used. |
 | `ec2-image-owner` | Optional. Used only with the `start` mode. | Scopes the `ec2-image-filters` AMI lookup to specific owners (AWS account IDs, `self`, `amazon`, or `aws-marketplace`). |
-| `ec2-instance-type`                                                                                                                                                          | Required if you use the `start` mode.      | EC2 Instance Type.                                                                                                                                                                                                                                                                                                                    |
-| `subnet-id`                                                                                                                                                                  | Required if you use the `start` mode.      | VPC Subnet Id. <br><br> The subnet should belong to the same VPC as the specified security group.                                                                                                                                                                                                                                     |
+| `ec2-instance-type`                                                                                                                                                          | Required if you use the `start` mode.      | EC2 Instance Type. <br><br> Accepts a comma-separated **ordered fallback list** (e.g. `c7i.4xlarge,c6i.4xlarge,m7i.4xlarge`) — see [Capacity fallback](#capacity-fallback-across-azs-and-instance-types). A single value behaves as before.                                                                                             |
+| `subnet-id`                                                                                                                                                                  | Required if you use the `start` mode.      | VPC Subnet Id. <br><br> The subnet should belong to the same VPC as the specified security group. <br><br> Accepts a comma-separated **ordered fallback list** of subnets (typically across AZs), e.g. `subnet-aaa,subnet-bbb`.                                                                                                          |
 | `security-group-id`                                                                                                                                                          | Required if you use the `start` mode.      | EC2 Security Group Id. <br><br> The security group should belong to the same VPC as the specified subnet. <br><br> Only the outbound traffic for port 443 should be allowed. No inbound traffic is required.                                                                                                                          |
 | `label`                                                                                                                                                                      | Required if you use the `stop` mode.       | Name of the unique label assigned to the runner. <br><br> The label is provided by the output of the action in the `start` mode. <br><br> The label is used to remove the runner from GitHub when the runner is not needed anymore.                                                                                                   |
 | `ec2-instance-id`                                                                                                                                                            | Required if you use the `stop` mode.       | EC2 Instance Id of the created runner. <br><br> The id is provided by the output of the action in the `start` mode. <br><br> The id is used to terminate the EC2 instance when the runner is not needed anymore.                                                                                                                      |
@@ -345,6 +345,8 @@ We recommend using [aws-actions/configure-aws-credentials](https://github.com/aw
 | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `label`                                                                                                                                                                      | Name of the unique label assigned to the runner. <br><br> The label is used in two cases: <br> - to use as the input of `runs-on` property for the following jobs; <br> - to remove the runner from GitHub when it is not needed anymore. |
 | `ec2-instance-id`                                                                                                                                                            | EC2 Instance Id of the created runner. <br><br> The id is used to terminate the EC2 instance when the runner is not needed anymore.                                                                                                       |
+| `instance-type-used`                                                                                                                                                         | The EC2 instance type actually launched. With a [capacity-fallback](#capacity-fallback-across-azs-and-instance-types) list this may differ from your first choice.                                                                        |
+| `subnet-id-used`                                                                                                                                                             | The subnet the runner was actually launched into. With a capacity-fallback list this may differ from your first choice.                                                                                                                  |
 
 ### Example
 
@@ -418,6 +420,24 @@ jobs:
 In [this discussion](https://github.com/machulav/ec2-github-runner/discussions/19), you can find feedback and examples from the users of the action.
 
 If you use this action in your workflow, feel free to add your story there as well 🙌
+
+## Capacity fallback across AZs and instance types
+
+A single `subnet-id` + `ec2-instance-type` means a single point of failure: when that AZ has no capacity for that type — routine for larger/GPU types — `RunInstances` fails and the whole workflow fails with it. Pass comma-separated ordered lists and the action walks them until a launch succeeds:
+
+```yml
+- name: Start EC2 runner
+  uses: namecheap/ec2-github-runner@v3
+  with:
+    mode: start
+    # ... other inputs ...
+    ec2-instance-type: c7i.4xlarge,c6i.4xlarge,m7i.4xlarge
+    subnet-id: subnet-aaa,subnet-bbb # different AZs
+```
+
+**Order:** for each instance type, every subnet/AZ is tried before downgrading to the next type (placement is cheaper than a hardware change). On an insufficient-capacity error the action advances to the next cell; **non-capacity errors** (invalid AMI, auth, or a quota like `InstanceLimitExceeded`) fail immediately so a misconfiguration doesn't burn through the whole matrix. Transient API errors are retried within each cell. Each failed placement logs a warning line (type, subnet, error code); full exhaustion fails with a summary of every attempt.
+
+The `instance-type-used` and `subnet-id-used` outputs report what actually launched. Single values keep the original single-attempt behavior.
 
 ## Disk space for Docker workloads
 

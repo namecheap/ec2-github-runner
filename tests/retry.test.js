@@ -52,6 +52,26 @@ describe('withRetry', () => {
     expect(final).toMatchObject({ step: 'test_step_retry', attempt: 3, exhausted: true });
   });
 
+  test('shouldRetry:false re-throws immediately without retrying', async () => {
+    const { withRetry } = load();
+    const fatal = Object.assign(new Error('bad config'), { name: 'InvalidAMIID.NotFound' });
+    const fn = jest.fn().mockRejectedValue(fatal);
+    await expect(
+      withRetry('test_step', fn, { attempts: 3, baseMs: 1, shouldRetry: () => false }),
+    ).rejects.toThrow('bad config');
+    expect(fn).toHaveBeenCalledTimes(1);
+    expect(coreMock.warning).not.toHaveBeenCalled();
+  });
+
+  test('shouldRetry:true keeps retrying (default behavior preserved)', async () => {
+    const { withRetry } = load();
+    const fn = jest.fn().mockRejectedValueOnce(new Error('t')).mockResolvedValue('ok');
+    await expect(
+      withRetry('test_step', fn, { attempts: 3, baseMs: 1, shouldRetry: () => true }),
+    ).resolves.toBe('ok');
+    expect(fn).toHaveBeenCalledTimes(2);
+  });
+
   test('backoff caps at maxMs', async () => {
     const { withRetry } = load();
     const fn = jest.fn()

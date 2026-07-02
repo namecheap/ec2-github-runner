@@ -13,8 +13,81 @@ const core = require('@actions/core');
 const config = require('./config');
 const log = require('./log');
 const { withRetry } = require('./retry');
-const { sortByCreationDate } = require('./utils');
+const { sortByCreationDate, parseCsv } = require('./utils');
 const checksums = require('./runner-checksums');
+
+// RunInstances error classification for the capacity-fallback chain.
+// - capacity: this placement (type × subnet/AZ) has no capacity right now —
+//   advance to the next cell in the chain.
+// - transient: a retryable API-layer hiccup — retry the same cell.
+// - fatal (default): misconfiguration or quota — abort immediately so a
+//   bad config doesn't burn through the whole matrix.
+const CAPACITY_ERROR_CODES = new Set([
+  'InsufficientInstanceCapacity',
+  'InsufficientHostCapacity',
+  'InsufficientReservedInstanceCapacity',
+  'Unsupported',
+  'SpotMaxPriceTooLow', // spot capacity (composes with #39)
+  'MaxSpotInstanceCountExceeded',
+]);
+const TRANSIENT_ERROR_CODES = new Set([
+  'RequestLimitExceeded',
+  'Throttling',
+  'ThrottlingException',
+  'InternalError',
+  'InternalFailure',
+  'ServiceUnavailable',
+  'Unavailable',
+]);
+
+function classifyRunError(error) {
+  const name = error && error.name;
+  if (CAPACITY_ERROR_CODES.has(name)) {
+    return 'capacity';
+  }
+  if (TRANSIENT_ERROR_CODES.has(name)) {
+    return 'transient';
+  }
+  return 'fatal';
+}
+
+// Walk the instance-type × subnet fallback chain until one placement
+// succeeds. Order: for each instance type, try every subnet/AZ before
+// downgrading the type (placement is cheaper than a hardware change). On a
+// capacity error, advance to the next cell; on a quota or any other fatal
+// error, abort immediately (a misconfig must not burn the whole matrix).
+// `attempt(instanceType, subnetId)` is injected (returns the instance id or
+// throws), keeping the ordering logic testable without the AWS SDK.
+async function launchWithFallback(attempt, instanceTypes, subnetIds) {
+  const failures = [];
+  for (const instanceType of instanceTypes) {
+    for (const subnetId of subnetIds) {
+      try {
+        const instanceId = await attempt(instanceType, subnetId);
+        return { instanceId, instanceType, subnetId };
+      } catch (error) {
+        const kind = classifyRunError(error);
+        if (kind === 'capacity') {
+          failures.push({ instanceType, subnetId, code: error.name || 'Unknown' });
+          log.warn('run_instance_fallback', { instance_type: instanceType, subnet_id: subnetId, error_code: error.name, message: error.message });
+          continue;
+        }
+        if (error.name === 'InstanceLimitExceeded') {
+          throw new Error(
+            `RunInstances hit an account quota (InstanceLimitExceeded) launching ${instanceType} in ${subnetId}: ${error.message}. ` +
+            'This is a service limit, not a capacity shortage — request a quota increase. The fallback chain was not continued.',
+            { cause: error },
+          );
+        }
+        throw error;
+      }
+    }
+  }
+  const summary = failures.map((f) => `${f.instanceType}/${f.subnetId}=${f.code}`).join('; ');
+  const error = new Error(`All ${failures.length} placement attempt(s) failed due to insufficient capacity: ${summary}`);
+  error.capacityExhausted = true;
+  throw error;
+}
 
 // Instance tag the bootstrap script writes to phone home its progress.
 // The start action polls it to fail fast on cloud-init errors instead of
@@ -357,13 +430,13 @@ async function startEc2Instance(label, githubRegistrationToken) {
   const resolved = await resolveImage(client);
   config.input.ec2ImageId = resolved.id;
 
+  // InstanceType and SubnetId are injected per attempt by the fallback
+  // chain (see below), so they are intentionally absent from the base.
   const params = {
     ImageId: config.input.ec2ImageId,
-    InstanceType: config.input.ec2InstanceType,
     MinCount: 1,
     MaxCount: 1,
     UserData: Buffer.from(userData).toString('base64'),
-    SubnetId: config.input.subnetId,
     SecurityGroupIds: [config.input.securityGroupId],
     IamInstanceProfile: { Name: config.input.iamRoleName },
     TagSpecifications: buildTagSpecifications(label, new Date().toISOString()),
@@ -406,26 +479,43 @@ async function startEc2Instance(label, githubRegistrationToken) {
     }
   }
 
-  let ec2InstanceId;
-  const runStart = Date.now();
+  // Capacity fallback: walk instance-type × subnet/AZ in order, advancing
+  // on capacity errors and retrying only transient API errors within each
+  // cell. Single-value inputs collapse to a one-cell chain (byte-identical
+  // to the pre-fallback behavior).
+  const instanceTypes = parseCsv(config.input.ec2InstanceType);
+  const subnetIds = parseCsv(config.input.subnetId);
   log.info('run_instance', {
     ami_id: config.input.ec2ImageId,
-    instance_type: config.input.ec2InstanceType,
-    subnet_id: config.input.subnetId,
+    instance_types: instanceTypes,
+    subnet_ids: subnetIds,
     sg_id: config.input.securityGroupId,
     iam_role: config.input.iamRoleName || null,
     label,
   });
+
+  const attempt = async (instanceType, subnetId) => {
+    const attemptParams = { ...params, InstanceType: instanceType, SubnetId: subnetId };
+    const result = await withRetry(
+      'run_instance',
+      () => client.send(new RunInstancesCommand(attemptParams)),
+      { shouldRetry: (error) => classifyRunError(error) === 'transient' },
+    );
+    return result.Instances[0].InstanceId;
+  };
+
+  let placement;
+  const runStart = Date.now();
   try {
-    const result = await client.send(new RunInstancesCommand(params));
-    ec2InstanceId = result.Instances[0].InstanceId;
-    log.info('run_instance', { instance_id: ec2InstanceId, elapsed_ms: Date.now() - runStart });
-    core.info(`AWS EC2 instance ${ec2InstanceId} is started`);
+    placement = await launchWithFallback(attempt, instanceTypes, subnetIds);
   } catch (error) {
     log.error('run_instance', { error: error.name, message: error.message });
     core.error('AWS EC2 instance starting error');
     throw error;
   }
+  const ec2InstanceId = placement.instanceId;
+  log.info('run_instance', { instance_id: ec2InstanceId, instance_type: placement.instanceType, subnet_id: placement.subnetId, elapsed_ms: Date.now() - runStart });
+  core.info(`AWS EC2 instance ${ec2InstanceId} is started (type ${placement.instanceType}, subnet ${placement.subnetId})`);
 
   if (config.input.eipAllocationId) {
     await waitForInstanceRunning(ec2InstanceId);
@@ -442,7 +532,7 @@ async function startEc2Instance(label, githubRegistrationToken) {
     }
   }
 
-  return ec2InstanceId;
+  return { instanceId: ec2InstanceId, instanceType: placement.instanceType, subnetId: placement.subnetId };
 }
 
 async function terminateInstanceById(ec2InstanceId) {
@@ -619,6 +709,8 @@ module.exports = {
   handleStartFailure,
   listManagedInstances,
   // Exported for unit testing.
+  classifyRunError,
+  launchWithFallback,
   buildRootDeviceMapping,
   wantsRootDeviceMapping,
   buildVolumeOpts,
