@@ -104651,6 +104651,7 @@ module.exports = {
 const {
   EC2Client,
   DescribeImagesCommand,
+  DescribeInstancesCommand,
   DescribeTagsCommand,
   GetConsoleOutputCommand,
   RunInstancesCommand,
@@ -104669,6 +104670,16 @@ const checksums = __nccwpck_require__(2874);
 // The start action polls it to fail fast on cloud-init errors instead of
 // waiting out the full registration timeout. See buildUserData().
 const BOOTSTRAP_TAG_KEY = 'ec2-github-runner:bootstrap';
+
+// Signature tags stamped on every instance the action launches. The
+// cleanup reaper (mode: cleanup) uses managed + repository to find only
+// instances this action started in the current repo, and started-at /
+// label to make safe reap decisions. See buildTagSpecifications() and
+// listManagedInstances().
+const MANAGED_TAG_KEY = 'ec2-github-runner:managed';
+const REPO_TAG_KEY = 'ec2-github-runner:repository';
+const LABEL_TAG_KEY = 'ec2-github-runner:label';
+const STARTED_AT_TAG_KEY = 'ec2-github-runner:started-at';
 
 // Console-output capture caps: keep the printed tail useful but bounded so a
 // runaway boot log can't flood the Actions run output.
@@ -104790,7 +104801,23 @@ function buildEncryptedRootMapping(image) {
 //   registration timeout. Tagging is best-effort: it needs
 //   `ec2:CreateTags` on the instance profile and degrades to
 //   timeout-only detection when absent (every write is `|| true`).
-function buildUserData({ runnerVersion, owner, repo, label, githubRegistrationToken, shaX64, shaArm64 }) {
+function buildUserData({ runnerVersion, owner, repo, label, githubRegistrationToken, shaX64, shaArm64, maxLifetimeMinutes }) {
+  // TTL self-destruct (#42): arm a shutdown timer as an absolute upper
+  // bound on instance lifetime. Combined with
+  // InstanceInitiatedShutdownBehavior: terminate on RunInstances (set in
+  // startEc2Instance when enabled), the instance terminates itself even if
+  // GitHub, the workflow, and the AWS control plane all disappear. '0'
+  // disables it (no timer emitted). Best-effort: `|| true` so a missing
+  // shutdown binary never aborts the bootstrap.
+  const ttl = Number(maxLifetimeMinutes);
+  const ttlLines = Number.isFinite(ttl) && ttl > 0
+    ? [
+      '# TTL self-destruct: hard upper bound on instance lifetime (max-lifetime-minutes).',
+      `shutdown -h +${ttl} || true`,
+      '',
+    ]
+    : [];
+
   // Shared shell helpers, emitted verbatim into both the outer (root) and
   // inner (runner-user) shells — each shell re-derives instance identity
   // from IMDS so it can keep phoning home independently.
@@ -104817,6 +104844,7 @@ function buildUserData({ runnerVersion, owner, repo, label, githubRegistrationTo
     'GH_RUNNER_STEP=preparing',
     "trap 'gh_runner_phone_home \"failed:${GH_RUNNER_STEP}\"' ERR",
     '',
+    ...ttlLines,
     '# Root-required setup.',
     'GH_RUNNER_STEP=preparing',
     'gh_runner_phone_home preparing',
@@ -104881,6 +104909,31 @@ function buildUserData({ runnerVersion, owner, repo, label, githubRegistrationTo
   ].join('\n');
 }
 
+// Build the RunInstances TagSpecifications, stamping every launched
+// instance (and its volumes) with the action's signature tags on top of
+// any user-supplied aws-resource-tags. The signature lets the cleanup
+// reaper positively identify instances this action started in this repo.
+// User tags win on key collision (spread last) so callers can't be
+// silently overridden — except the reserved signature keys, which are
+// re-applied to keep the reaper's guarantees intact.
+function buildTagSpecifications(label, startedAtIso) {
+  const owner = config.githubContext.owner;
+  const repo = config.githubContext.repo;
+  const userTags = config.input.awsResourceTags || [];
+  const signatureKeys = new Set([MANAGED_TAG_KEY, REPO_TAG_KEY, LABEL_TAG_KEY, STARTED_AT_TAG_KEY]);
+  const tags = [
+    ...userTags.filter((t) => !signatureKeys.has(t.Key)),
+    { Key: MANAGED_TAG_KEY, Value: 'true' },
+    { Key: REPO_TAG_KEY, Value: `${owner}/${repo}` },
+    { Key: LABEL_TAG_KEY, Value: label },
+    { Key: STARTED_AT_TAG_KEY, Value: startedAtIso },
+  ];
+  return [
+    { ResourceType: 'instance', Tags: tags },
+    { ResourceType: 'volume', Tags: tags },
+  ];
+}
+
 async function startEc2Instance(label, githubRegistrationToken) {
   const client = ec2Client();
 
@@ -104897,7 +104950,8 @@ async function startEc2Instance(label, githubRegistrationToken) {
     );
   }
 
-  const userData = buildUserData({ runnerVersion, owner, repo, label, githubRegistrationToken, shaX64, shaArm64 });
+  const maxLifetimeMinutes = config.input.maxLifetimeMinutes;
+  const userData = buildUserData({ runnerVersion, owner, repo, label, githubRegistrationToken, shaX64, shaArm64, maxLifetimeMinutes });
 
   const resolved = await resolveImage(client);
   config.input.ec2ImageId = resolved.id;
@@ -104911,7 +104965,7 @@ async function startEc2Instance(label, githubRegistrationToken) {
     SubnetId: config.input.subnetId,
     SecurityGroupIds: [config.input.securityGroupId],
     IamInstanceProfile: { Name: config.input.iamRoleName },
-    TagSpecifications: config.tagSpecifications,
+    TagSpecifications: buildTagSpecifications(label, new Date().toISOString()),
     // IMDSv2 required by default. Mitigates SSRF-style IAM credential
     // theft from the runner — any metadata request must present a
     // session token. HttpPutResponseHopLimit: 1 prevents the token
@@ -104922,6 +104976,14 @@ async function startEc2Instance(label, githubRegistrationToken) {
       HttpEndpoint: 'enabled',
     },
   };
+
+  // TTL self-destruct: terminate (not stop) when the in-instance shutdown
+  // timer fires, so the hard lifetime bound actually frees the instance.
+  // Only set when the timer is armed (max-lifetime-minutes != 0) to keep
+  // the default launch behavior unchanged.
+  if (Number(maxLifetimeMinutes) > 0) {
+    params.InstanceInitiatedShutdownBehavior = 'terminate';
+  }
 
   if (config.input.encryptEbs === 'true') {
     const mappings = buildEncryptedRootMapping(resolved.image);
@@ -105098,6 +105160,48 @@ async function handleStartFailure(ec2InstanceId, opts = {}) {
   }
 }
 
+// List running/pending instances this action launched in the given repo,
+// for the cleanup reaper. Filtering is server-side on the full signature
+// (managed=true AND repository=repo) and re-validated client-side (belt-
+// and-braces: only instances carrying both signature tags are ever
+// returned, so a near-miss tag set can never be reaped). Each result
+// carries the parsed started-at (ms; falls back to LaunchTime) and label
+// the reaper needs to make its decision.
+async function listManagedInstances(repo) {
+  const client = ec2Client();
+  const resp = await client.send(new DescribeInstancesCommand({
+    Filters: [
+      { Name: `tag:${MANAGED_TAG_KEY}`, Values: ['true'] },
+      { Name: `tag:${REPO_TAG_KEY}`, Values: [repo] },
+      { Name: 'instance-state-name', Values: ['pending', 'running'] },
+    ],
+  }));
+
+  const instances = [];
+  for (const reservation of resp.Reservations || []) {
+    for (const instance of reservation.Instances || []) {
+      const tags = {};
+      for (const tag of instance.Tags || []) {
+        tags[tag.Key] = tag.Value;
+      }
+      // Client-side re-validation of the full signature.
+      if (tags[MANAGED_TAG_KEY] !== 'true' || tags[REPO_TAG_KEY] !== repo) {
+        continue;
+      }
+      const startedAtRaw = tags[STARTED_AT_TAG_KEY];
+      const startedAtMs = startedAtRaw && !Number.isNaN(Date.parse(startedAtRaw))
+        ? Date.parse(startedAtRaw)
+        : (instance.LaunchTime ? new Date(instance.LaunchTime).getTime() : null);
+      instances.push({
+        instanceId: instance.InstanceId,
+        label: tags[LABEL_TAG_KEY] || null,
+        startedAtMs,
+      });
+    }
+  }
+  return instances;
+}
+
 module.exports = {
   startEc2Instance,
   terminateEc2Instance,
@@ -105106,11 +105210,160 @@ module.exports = {
   getBootstrapStatus,
   getConsoleOutputTail,
   handleStartFailure,
+  listManagedInstances,
   // Exported for unit testing.
   buildEncryptedRootMapping,
   buildUserData,
+  buildTagSpecifications,
   redactSecrets,
   BOOTSTRAP_TAG_KEY,
+  MANAGED_TAG_KEY,
+  REPO_TAG_KEY,
+  LABEL_TAG_KEY,
+  STARTED_AT_TAG_KEY,
+};
+
+
+/***/ }),
+
+/***/ 5541:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const log = __nccwpck_require__(7223);
+
+// Instances younger than this are never reaped, even if no runner is
+// registered for them yet — they may be in-flight starts still working
+// through the bootstrap/registration window. Keeps the reaper safe to run
+// concurrently with `mode: start`.
+const REAP_GRACE_MINUTES = 15;
+
+// Decide what to do with a single managed instance given its matching
+// GitHub runner (or null if none is registered). Pure function — no I/O —
+// so the full decision matrix is unit-testable.
+//
+//   within grace period         -> skip  (protect in-flight starts)
+//   no runner registered        -> reap  (leaked instance)
+//   runner busy                 -> skip  (job in progress, any age)
+//   runner idle, older than max -> reap + deregister
+//   runner idle, within max age  -> skip
+function decideReap(instance, runner, opts) {
+  const { nowMs, maxAgeMinutes, graceMinutes } = opts;
+  const ageMinutes = instance.startedAtMs != null ? (nowMs - instance.startedAtMs) / 60000 : Infinity;
+
+  if (ageMinutes < graceMinutes) {
+    return { action: 'skip', reason: 'within-grace-period', deregister: false };
+  }
+  if (!runner) {
+    return { action: 'reap', reason: 'runner-not-registered', deregister: false };
+  }
+  if (runner.busy) {
+    return { action: 'skip', reason: 'runner-busy', deregister: false };
+  }
+  if (ageMinutes > maxAgeMinutes) {
+    return { action: 'reap', reason: 'runner-idle-past-max-age', deregister: true };
+  }
+  return { action: 'skip', reason: 'runner-idle-within-max-age', deregister: false };
+}
+
+// Walk every managed instance in the repo, decide, and (unless dryRun)
+// terminate + deregister the ones that should be reaped. All AWS/GitHub
+// I/O and the clock are injected via deps so the orchestration is
+// testable end-to-end with mocks:
+//   deps.listManagedInstances(): Promise<Array<{instanceId,label,startedAtMs}>>
+//   deps.getRunnerByLabel(label): Promise<runner|null>
+//   deps.terminateInstance(id): Promise<void>
+//   deps.deregisterRunner(runnerId): Promise<void>
+//   deps.now(): number (ms)
+// A single instance failing to terminate/deregister is recorded on its row
+// and does not abort the sweep.
+async function runReaper(deps, opts = {}) {
+  const { listManagedInstances, getRunnerByLabel, terminateInstance, deregisterRunner, now } = deps;
+  const maxAgeMinutes = opts.maxAgeMinutes;
+  const graceMinutes = opts.graceMinutes ?? REAP_GRACE_MINUTES;
+  const dryRun = !!opts.dryRun;
+
+  const instances = await listManagedInstances();
+  const nowMs = now();
+  const rows = [];
+  let reaped = 0;
+  let skipped = 0;
+
+  for (const instance of instances) {
+    const runner = instance.label ? await getRunnerByLabel(instance.label) : null;
+    const decision = decideReap(instance, runner, { nowMs, maxAgeMinutes, graceMinutes });
+    const row = {
+      instanceId: instance.instanceId,
+      label: instance.label,
+      action: decision.action,
+      reason: decision.reason,
+      performed: false,
+    };
+
+    if (decision.action === 'reap') {
+      reaped += 1;
+      if (!dryRun) {
+        try {
+          await terminateInstance(instance.instanceId);
+          row.performed = true;
+          if (decision.deregister && runner) {
+            try {
+              await deregisterRunner(runner.id);
+              row.deregistered = true;
+            } catch (error) {
+              row.deregisterError = error.message;
+              log.error('reaper_deregister', { instance_id: instance.instanceId, runner_id: runner.id, error: error.name, message: error.message });
+            }
+          }
+        } catch (error) {
+          row.error = error.message;
+          log.error('reaper_terminate', { instance_id: instance.instanceId, error: error.name, message: error.message });
+        }
+      }
+    } else {
+      skipped += 1;
+    }
+
+    log.info('reaper_decision', { instance_id: instance.instanceId, label: instance.label, action: decision.action, reason: decision.reason, dry_run: dryRun });
+    rows.push(row);
+  }
+
+  return { examined: instances.length, reaped, skipped, dryRun, rows };
+}
+
+// Render the reaper result as a GitHub Actions job-summary markdown table.
+function renderCleanupSummary(summary) {
+  const heading = summary.dryRun ? 'EC2 runner cleanup (dry-run)' : 'EC2 runner cleanup';
+  const lines = [
+    `### ${heading}`,
+    '',
+    `Examined: **${summary.examined}** · Reaped: **${summary.reaped}** · Skipped: **${summary.skipped}**`,
+    '',
+    '| Instance | Label | Action | Reason | Result |',
+    '| --- | --- | --- | --- | --- |',
+  ];
+  for (const r of summary.rows) {
+    let result;
+    if (r.action !== 'reap') {
+      result = '—';
+    } else if (summary.dryRun) {
+      result = 'would reap';
+    } else if (r.error) {
+      result = `error: ${r.error}`;
+    } else if (r.deregistered) {
+      result = 'terminated + deregistered';
+    } else {
+      result = 'terminated';
+    }
+    lines.push(`| ${r.instanceId} | ${r.label || '—'} | ${r.action} | ${r.reason} | ${result} |`);
+  }
+  return lines.join('\n');
+}
+
+module.exports = {
+  decideReap,
+  runReaper,
+  renderCleanupSummary,
+  REAP_GRACE_MINUTES,
 };
 
 
@@ -105141,14 +105394,17 @@ class Config {
       httpTokens: core.getInput('http-tokens') || 'required',
       encryptEbs: core.getInput('encrypt-ebs') || 'false',
       cleanupOnStartFailure: core.getInput('cleanup-on-start-failure') || 'true',
+      maxLifetimeMinutes: core.getInput('max-lifetime-minutes') || '360',
+      maxAgeMinutes: core.getInput('max-age-minutes') || '120',
+      dryRun: core.getInput('dry-run') || 'false',
       debug: core.getInput('debug') || 'false',
     };
 
-    const tags = JSON.parse(core.getInput('aws-resource-tags'));
-    this.tagSpecifications = null;
-    if (tags.length > 0) {
-      this.tagSpecifications = [{ResourceType: 'instance', Tags: tags}, {ResourceType: 'volume', Tags: tags}];
-    }
+    // Raw user-supplied resource tags. The action always merges its own
+    // signature tags (managed/repository/label/started-at — see
+    // src/aws.js) on top of these so the cleanup reaper can identify
+    // instances it launched.
+    this.input.awsResourceTags = JSON.parse(core.getInput('aws-resource-tags'));
 
     // the values of github.context.repo.owner and github.context.repo.repo are taken from
     // the environment variable GITHUB_REPOSITORY specified in "owner/repo" format and
@@ -105181,8 +105437,12 @@ class Config {
       if (!this.input.label || !this.input.ec2InstanceId) {
         throw new Error(`Not all the required inputs are provided for the 'stop' mode`);
       }
+    } else if (this.input.mode === 'cleanup') {
+      // The reaper needs only the github-token (validated above) and
+      // operates on the current repository; max-age-minutes and dry-run
+      // have safe defaults.
     } else {
-      throw new Error('Wrong mode. Allowed values: start, stop.');
+      throw new Error('Wrong mode. Allowed values: start, stop, cleanup.');
     }
   }
 
@@ -105242,9 +105502,17 @@ async function getRegistrationToken() {
   }
 }
 
+// Deregister a self-hosted runner by its GitHub runner id. Idempotent
+// (DELETE), so it's retried on transient errors.
+async function deregisterRunner(runnerId) {
+  const octokit = github.getOctokit(config.input.githubToken);
+  await withRetry('remove_runner', () =>
+    octokit.request('DELETE /repos/{owner}/{repo}/actions/runners/{runner_id}', { ...config.githubContext, runner_id: runnerId }),
+  );
+}
+
 async function removeRunner() {
   const runner = await getRunner(config.input.label);
-  const octokit = github.getOctokit(config.input.githubToken);
 
   // skip the runner removal process if the runner is not found
   if (!runner) {
@@ -105256,9 +105524,7 @@ async function removeRunner() {
   const start = Date.now();
   log.info('remove_runner', { runner_id: runner.id, label: config.input.label });
   try {
-    await withRetry('remove_runner', () =>
-      octokit.request('DELETE /repos/{owner}/{repo}/actions/runners/{runner_id}', { ...config.githubContext, runner_id: runner.id }),
-    );
+    await deregisterRunner(runner.id);
     log.info('remove_runner', { runner_id: runner.id, label: config.input.label, elapsed_ms: Date.now() - start });
     core.info(`GitHub self-hosted runner ${runner.name} is removed`);
     return;
@@ -105281,7 +105547,9 @@ async function isRunnerOnline(label) {
 module.exports = {
   getRegistrationToken,
   removeRunner,
+  deregisterRunner,
   isRunnerOnline,
+  getRunner,
 };
 
 
@@ -110445,6 +110713,7 @@ const gh = __nccwpck_require__(5934);
 const config = __nccwpck_require__(1283);
 const log = __nccwpck_require__(7223);
 const { waitForRunnerReady } = __nccwpck_require__(8644);
+const { runReaper, renderCleanupSummary, REAP_GRACE_MINUTES } = __nccwpck_require__(5541);
 const core = __nccwpck_require__(7484);
 
 // Write directly to the $GITHUB_OUTPUT file. The bundled @actions/core
@@ -110523,9 +110792,55 @@ async function stop() {
   }
 }
 
+// Write the reaper's job-summary table to $GITHUB_STEP_SUMMARY (the
+// documented mechanism) and echo it to the log so it's visible even when
+// the summary file isn't set (e.g. local runs).
+function writeJobSummary(markdown) {
+  const summaryFile = process.env.GITHUB_STEP_SUMMARY;
+  if (summaryFile) {
+    fs.appendFileSync(summaryFile, `${markdown}${os.EOL}`);
+  }
+  core.info(markdown);
+}
+
+async function cleanup() {
+  core.startGroup('cleanup-runners');
+  try {
+    const repo = `${config.githubContext.owner}/${config.githubContext.repo}`;
+    const dryRun = config.input.dryRun === 'true';
+    log.info('cleanup', { repo, max_age_minutes: config.input.maxAgeMinutes, dry_run: dryRun });
+
+    const summary = await runReaper(
+      {
+        listManagedInstances: () => aws.listManagedInstances(repo),
+        getRunnerByLabel: (label) => gh.getRunner(label),
+        terminateInstance: (id) => aws.terminateInstanceById(id),
+        deregisterRunner: (runnerId) => gh.deregisterRunner(runnerId),
+        now: () => Date.now(),
+      },
+      {
+        maxAgeMinutes: Number(config.input.maxAgeMinutes),
+        graceMinutes: REAP_GRACE_MINUTES,
+        dryRun,
+      },
+    );
+
+    writeJobSummary(renderCleanupSummary(summary));
+    log.info('cleanup', { outcome: 'ok', examined: summary.examined, reaped: summary.reaped, skipped: summary.skipped, dry_run: dryRun });
+  } finally {
+    core.endGroup();
+  }
+}
+
 (async function () {
   try {
-    config.input.mode === 'start' ? await start() : await stop();
+    if (config.input.mode === 'start') {
+      await start();
+    } else if (config.input.mode === 'stop') {
+      await stop();
+    } else {
+      await cleanup();
+    }
   } catch (error) {
     log.error('fatal', { mode: config.input.mode, error: error.name, message: error.message });
     core.error(error);

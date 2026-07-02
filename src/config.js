@@ -20,14 +20,17 @@ class Config {
       httpTokens: core.getInput('http-tokens') || 'required',
       encryptEbs: core.getInput('encrypt-ebs') || 'false',
       cleanupOnStartFailure: core.getInput('cleanup-on-start-failure') || 'true',
+      maxLifetimeMinutes: core.getInput('max-lifetime-minutes') || '360',
+      maxAgeMinutes: core.getInput('max-age-minutes') || '120',
+      dryRun: core.getInput('dry-run') || 'false',
       debug: core.getInput('debug') || 'false',
     };
 
-    const tags = JSON.parse(core.getInput('aws-resource-tags'));
-    this.tagSpecifications = null;
-    if (tags.length > 0) {
-      this.tagSpecifications = [{ResourceType: 'instance', Tags: tags}, {ResourceType: 'volume', Tags: tags}];
-    }
+    // Raw user-supplied resource tags. The action always merges its own
+    // signature tags (managed/repository/label/started-at — see
+    // src/aws.js) on top of these so the cleanup reaper can identify
+    // instances it launched.
+    this.input.awsResourceTags = JSON.parse(core.getInput('aws-resource-tags'));
 
     // the values of github.context.repo.owner and github.context.repo.repo are taken from
     // the environment variable GITHUB_REPOSITORY specified in "owner/repo" format and
@@ -60,8 +63,12 @@ class Config {
       if (!this.input.label || !this.input.ec2InstanceId) {
         throw new Error(`Not all the required inputs are provided for the 'stop' mode`);
       }
+    } else if (this.input.mode === 'cleanup') {
+      // The reaper needs only the github-token (validated above) and
+      // operates on the current repository; max-age-minutes and dry-run
+      // have safe defaults.
     } else {
-      throw new Error('Wrong mode. Allowed values: start, stop.');
+      throw new Error('Wrong mode. Allowed values: start, stop, cleanup.');
     }
   }
 

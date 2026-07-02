@@ -1,6 +1,7 @@
 const {
   EC2Client,
   DescribeImagesCommand,
+  DescribeInstancesCommand,
   DescribeTagsCommand,
   GetConsoleOutputCommand,
   RunInstancesCommand,
@@ -19,6 +20,16 @@ const checksums = require('./runner-checksums');
 // The start action polls it to fail fast on cloud-init errors instead of
 // waiting out the full registration timeout. See buildUserData().
 const BOOTSTRAP_TAG_KEY = 'ec2-github-runner:bootstrap';
+
+// Signature tags stamped on every instance the action launches. The
+// cleanup reaper (mode: cleanup) uses managed + repository to find only
+// instances this action started in the current repo, and started-at /
+// label to make safe reap decisions. See buildTagSpecifications() and
+// listManagedInstances().
+const MANAGED_TAG_KEY = 'ec2-github-runner:managed';
+const REPO_TAG_KEY = 'ec2-github-runner:repository';
+const LABEL_TAG_KEY = 'ec2-github-runner:label';
+const STARTED_AT_TAG_KEY = 'ec2-github-runner:started-at';
 
 // Console-output capture caps: keep the printed tail useful but bounded so a
 // runaway boot log can't flood the Actions run output.
@@ -140,7 +151,23 @@ function buildEncryptedRootMapping(image) {
 //   registration timeout. Tagging is best-effort: it needs
 //   `ec2:CreateTags` on the instance profile and degrades to
 //   timeout-only detection when absent (every write is `|| true`).
-function buildUserData({ runnerVersion, owner, repo, label, githubRegistrationToken, shaX64, shaArm64 }) {
+function buildUserData({ runnerVersion, owner, repo, label, githubRegistrationToken, shaX64, shaArm64, maxLifetimeMinutes }) {
+  // TTL self-destruct (#42): arm a shutdown timer as an absolute upper
+  // bound on instance lifetime. Combined with
+  // InstanceInitiatedShutdownBehavior: terminate on RunInstances (set in
+  // startEc2Instance when enabled), the instance terminates itself even if
+  // GitHub, the workflow, and the AWS control plane all disappear. '0'
+  // disables it (no timer emitted). Best-effort: `|| true` so a missing
+  // shutdown binary never aborts the bootstrap.
+  const ttl = Number(maxLifetimeMinutes);
+  const ttlLines = Number.isFinite(ttl) && ttl > 0
+    ? [
+      '# TTL self-destruct: hard upper bound on instance lifetime (max-lifetime-minutes).',
+      `shutdown -h +${ttl} || true`,
+      '',
+    ]
+    : [];
+
   // Shared shell helpers, emitted verbatim into both the outer (root) and
   // inner (runner-user) shells — each shell re-derives instance identity
   // from IMDS so it can keep phoning home independently.
@@ -167,6 +194,7 @@ function buildUserData({ runnerVersion, owner, repo, label, githubRegistrationTo
     'GH_RUNNER_STEP=preparing',
     "trap 'gh_runner_phone_home \"failed:${GH_RUNNER_STEP}\"' ERR",
     '',
+    ...ttlLines,
     '# Root-required setup.',
     'GH_RUNNER_STEP=preparing',
     'gh_runner_phone_home preparing',
@@ -231,6 +259,31 @@ function buildUserData({ runnerVersion, owner, repo, label, githubRegistrationTo
   ].join('\n');
 }
 
+// Build the RunInstances TagSpecifications, stamping every launched
+// instance (and its volumes) with the action's signature tags on top of
+// any user-supplied aws-resource-tags. The signature lets the cleanup
+// reaper positively identify instances this action started in this repo.
+// User tags win on key collision (spread last) so callers can't be
+// silently overridden — except the reserved signature keys, which are
+// re-applied to keep the reaper's guarantees intact.
+function buildTagSpecifications(label, startedAtIso) {
+  const owner = config.githubContext.owner;
+  const repo = config.githubContext.repo;
+  const userTags = config.input.awsResourceTags || [];
+  const signatureKeys = new Set([MANAGED_TAG_KEY, REPO_TAG_KEY, LABEL_TAG_KEY, STARTED_AT_TAG_KEY]);
+  const tags = [
+    ...userTags.filter((t) => !signatureKeys.has(t.Key)),
+    { Key: MANAGED_TAG_KEY, Value: 'true' },
+    { Key: REPO_TAG_KEY, Value: `${owner}/${repo}` },
+    { Key: LABEL_TAG_KEY, Value: label },
+    { Key: STARTED_AT_TAG_KEY, Value: startedAtIso },
+  ];
+  return [
+    { ResourceType: 'instance', Tags: tags },
+    { ResourceType: 'volume', Tags: tags },
+  ];
+}
+
 async function startEc2Instance(label, githubRegistrationToken) {
   const client = ec2Client();
 
@@ -247,7 +300,8 @@ async function startEc2Instance(label, githubRegistrationToken) {
     );
   }
 
-  const userData = buildUserData({ runnerVersion, owner, repo, label, githubRegistrationToken, shaX64, shaArm64 });
+  const maxLifetimeMinutes = config.input.maxLifetimeMinutes;
+  const userData = buildUserData({ runnerVersion, owner, repo, label, githubRegistrationToken, shaX64, shaArm64, maxLifetimeMinutes });
 
   const resolved = await resolveImage(client);
   config.input.ec2ImageId = resolved.id;
@@ -261,7 +315,7 @@ async function startEc2Instance(label, githubRegistrationToken) {
     SubnetId: config.input.subnetId,
     SecurityGroupIds: [config.input.securityGroupId],
     IamInstanceProfile: { Name: config.input.iamRoleName },
-    TagSpecifications: config.tagSpecifications,
+    TagSpecifications: buildTagSpecifications(label, new Date().toISOString()),
     // IMDSv2 required by default. Mitigates SSRF-style IAM credential
     // theft from the runner — any metadata request must present a
     // session token. HttpPutResponseHopLimit: 1 prevents the token
@@ -272,6 +326,14 @@ async function startEc2Instance(label, githubRegistrationToken) {
       HttpEndpoint: 'enabled',
     },
   };
+
+  // TTL self-destruct: terminate (not stop) when the in-instance shutdown
+  // timer fires, so the hard lifetime bound actually frees the instance.
+  // Only set when the timer is armed (max-lifetime-minutes != 0) to keep
+  // the default launch behavior unchanged.
+  if (Number(maxLifetimeMinutes) > 0) {
+    params.InstanceInitiatedShutdownBehavior = 'terminate';
+  }
 
   if (config.input.encryptEbs === 'true') {
     const mappings = buildEncryptedRootMapping(resolved.image);
@@ -448,6 +510,48 @@ async function handleStartFailure(ec2InstanceId, opts = {}) {
   }
 }
 
+// List running/pending instances this action launched in the given repo,
+// for the cleanup reaper. Filtering is server-side on the full signature
+// (managed=true AND repository=repo) and re-validated client-side (belt-
+// and-braces: only instances carrying both signature tags are ever
+// returned, so a near-miss tag set can never be reaped). Each result
+// carries the parsed started-at (ms; falls back to LaunchTime) and label
+// the reaper needs to make its decision.
+async function listManagedInstances(repo) {
+  const client = ec2Client();
+  const resp = await client.send(new DescribeInstancesCommand({
+    Filters: [
+      { Name: `tag:${MANAGED_TAG_KEY}`, Values: ['true'] },
+      { Name: `tag:${REPO_TAG_KEY}`, Values: [repo] },
+      { Name: 'instance-state-name', Values: ['pending', 'running'] },
+    ],
+  }));
+
+  const instances = [];
+  for (const reservation of resp.Reservations || []) {
+    for (const instance of reservation.Instances || []) {
+      const tags = {};
+      for (const tag of instance.Tags || []) {
+        tags[tag.Key] = tag.Value;
+      }
+      // Client-side re-validation of the full signature.
+      if (tags[MANAGED_TAG_KEY] !== 'true' || tags[REPO_TAG_KEY] !== repo) {
+        continue;
+      }
+      const startedAtRaw = tags[STARTED_AT_TAG_KEY];
+      const startedAtMs = startedAtRaw && !Number.isNaN(Date.parse(startedAtRaw))
+        ? Date.parse(startedAtRaw)
+        : (instance.LaunchTime ? new Date(instance.LaunchTime).getTime() : null);
+      instances.push({
+        instanceId: instance.InstanceId,
+        label: tags[LABEL_TAG_KEY] || null,
+        startedAtMs,
+      });
+    }
+  }
+  return instances;
+}
+
 module.exports = {
   startEc2Instance,
   terminateEc2Instance,
@@ -456,9 +560,15 @@ module.exports = {
   getBootstrapStatus,
   getConsoleOutputTail,
   handleStartFailure,
+  listManagedInstances,
   // Exported for unit testing.
   buildEncryptedRootMapping,
   buildUserData,
+  buildTagSpecifications,
   redactSecrets,
   BOOTSTRAP_TAG_KEY,
+  MANAGED_TAG_KEY,
+  REPO_TAG_KEY,
+  LABEL_TAG_KEY,
+  STARTED_AT_TAG_KEY,
 };

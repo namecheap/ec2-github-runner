@@ -199,7 +199,7 @@ This action reads AWS credentials from the environment. Two paths — pick one.
    }
    ```
 
-   If you use the `aws-resource-tags` parameter, you will also need to allow the permissions to create tags:
+   The action always tags every instance it launches — with its own signature tags (`ec2-github-runner:managed`, `:repository`, `:label`, `:started-at`, which the [cleanup reaper](#reaping-orphaned-runners-mode-cleanup) relies on) plus any `aws-resource-tags` you supply — so `ec2:CreateTags` at launch time is required:
 
    ```
    {
@@ -220,6 +220,8 @@ This action reads AWS credentials from the environment. Two paths — pick one.
     ]
    }
    ```
+
+   The base policy already grants `ec2:DescribeInstances` and `ec2:TerminateInstances`, which are all the `cleanup` reaper needs on the AWS side (it deregisters runners through the `github-token`). You can scope `TerminateInstances` to tagged instances with a `Condition` on `aws:ResourceTag/ec2-github-runner:managed` for defense in depth.
 
    These example policies above are provided as a guide. They can and most likely should be limited even more by specifying the resources you use.
 
@@ -317,6 +319,9 @@ Now you're ready to go!
 | `http-tokens` | Optional. Used only with the `start` mode. | Instance Metadata Service (IMDS) token mode (default `required`). <br><br> - `required` — IMDSv2 only; mitigates SSRF-style credential theft. <br> - `optional` — also allows IMDSv1; set only if a workload on the runner needs it. |
 | `encrypt-ebs` | Optional. Used only with the `start` mode. | When `true`, the root EBS volume is created with SSE-EBS encryption using the account's default AWS-managed key (default `false`). Volume size / type / IOPS are preserved from the AMI. |
 | `cleanup-on-start-failure` | Optional. Used only with the `start` mode. | When `true` (default), a runner that fails to bootstrap or register has its console output captured and is then terminated so the failed start doesn't leak a billing instance. Set `false` to leave the instance running for interactive debugging. <br><br> **Behavior change:** older versions left the instance running after a registration timeout; the default is now to terminate it. See [Troubleshooting a failed start](#troubleshooting-a-failed-start). |
+| `max-lifetime-minutes` | Optional. Used only with the `start` mode. | Hard upper bound (minutes) on the instance's lifetime (default `360`). The instance arms a self-shutdown timer and launches with `InstanceInitiatedShutdownBehavior=terminate`, so it terminates itself at the TTL even if GitHub, the workflow, and AWS APIs are all unreachable. Size it **above your longest legitimate job** — a job still running at the TTL is killed. Set `0` to disable. See [Reaping orphaned runners](#reaping-orphaned-runners-mode-cleanup). |
+| `max-age-minutes` | Optional. Used only with the `cleanup` mode. | A registered-but-idle runner instance older than this many minutes is reaped (default `120`). Instances whose runner is no longer registered are reaped regardless of age, subject to a 15-minute grace floor that protects in-flight starts. Busy runners are never reaped. |
+| `dry-run` | Optional. Used only with the `cleanup` mode. | When `true`, the reaper lists what it would terminate (and why) in the job summary without terminating anything or deregistering runners. Default `false`. |
 | `debug` | Optional. | When `true`, the action emits extra diagnostic output to the Actions log — inputs (secrets redacted), AWS SDK response metadata, and runner-registration poll details. Default `false`. |
 
 ### Environment variables
@@ -409,6 +414,32 @@ jobs:
 In [this discussion](https://github.com/machulav/ec2-github-runner/discussions/19), you can find feedback and examples from the users of the action.
 
 If you use this action in your workflow, feel free to add your story there as well 🙌
+
+## Reaping orphaned runners (`mode: cleanup`)
+
+The `stop` step runs with `if: always()`, but that still doesn't cover every leak path — a cancelled workflow where the stop job never scheduled, a runner crash, a GitHub/AWS outage mid-run, or the workflow being killed after `start` but before `stop`. Every leaked instance bills until someone notices. Two independent, defense-in-depth layers close these paths.
+
+### 1. TTL self-destruct (`max-lifetime-minutes`)
+
+Every launched instance arms a self-shutdown timer and runs with `InstanceInitiatedShutdownBehavior=terminate`, so it terminates itself at the TTL (default 6 hours) even if GitHub, the workflow, and the AWS control plane are all unreachable. This is an absolute upper bound, not a normal-path mechanism — normal termination still happens in the `stop` step.
+
+**Size `max-lifetime-minutes` above your longest legitimate job**, with headroom for bootstrap time; a job still running when the timer fires is killed. Set `0` to disable it (e.g. if you have very long jobs and rely solely on the reaper below).
+
+### 2. The reaper (`mode: cleanup`)
+
+Run the action in `cleanup` mode on a schedule. It finds instances **this action started in the current repository** (matched on its full signature tag set), cross-checks each against the GitHub runners API, and terminates the orphans:
+
+| Runner state for the instance | Action |
+| --- | --- |
+| Younger than the 15-min grace floor | **skip** (may be an in-flight start) |
+| No runner registered | **reap** |
+| Runner busy | **skip** (regardless of age) |
+| Runner idle, older than `max-age-minutes` | **reap** + deregister |
+| Runner idle, within `max-age-minutes` | **skip** |
+
+It writes a job-summary table of everything examined, reaped, and skipped (with reasons). Use `dry-run: true` to preview without terminating anything. A ready-to-use scheduled workflow is in [`docs/cleanup-workflow.yml`](docs/cleanup-workflow.yml).
+
+The reaper needs `ec2:DescribeInstances` + `ec2:TerminateInstances` (already in the base [permissions policy](#2-prepare-the-aws-access-credentials)) and deregisters runners through the `github-token`. It is scoped **per repository** — run it in each repo that uses the action.
 
 ## Troubleshooting a failed start
 
