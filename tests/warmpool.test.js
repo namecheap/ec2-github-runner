@@ -127,6 +127,47 @@ describe('getInstanceCycles / setInstanceCycles', () => {
 describe('buildUserData — reuse: stop variant', () => {
   const args = { runnerVersion: '2.335.1', owner: 'o', repo: 'r', label: 'l', githubRegistrationToken: 'TOK', shaX64: 'x', shaArm64: 'a' };
 
+  // Isolates the body of the sudo -u runner RUNNER_DOWNLOAD heredoc from the
+  // rest of the generated script, so assertions about what runs inside that
+  // runner-user shell can't be satisfied by matches elsewhere in the script
+  // (the outer root shell's own preparing trap, or the register script's
+  // configuring trap).
+  const extractRunnerDownloadHeredoc = (ud) => {
+    const startMarker = "sudo -u runner -H bash <<'RUNNER_DOWNLOAD'";
+    const start = ud.indexOf(startMarker);
+    expect(start).toBeGreaterThan(-1);
+    const bodyStart = start + startMarker.length;
+    const end = ud.indexOf('\nRUNNER_DOWNLOAD', bodyStart);
+    expect(end).toBeGreaterThan(bodyStart);
+    return ud.slice(bodyStart, end);
+  };
+
+  test('re-includes PHONE_HOME_HELPERS inside the RUNNER_DOWNLOAD heredoc (regression, #61)', () => {
+    const ud = aws.buildUserData({ ...args, reuse: 'stop' });
+    const heredoc = extractRunnerDownloadHeredoc(ud);
+    // Functions/traps set in the outer (root) shell do not survive the
+    // `sudo -u runner` boundary — the helpers must be redefined inside this
+    // heredoc, exactly as the plain-path RUNNER_BOOTSTRAP shell does.
+    expect(heredoc).toContain('gh_runner_imds() {');
+    expect(heredoc).toContain('gh_runner_phone_home() {');
+    expect(heredoc).toContain(`Key=${aws.BOOTSTRAP_TAG_KEY},Value=$1`);
+  });
+
+  test('arms an ERR trap for the downloading phase inside the RUNNER_DOWNLOAD heredoc (regression, #61)', () => {
+    const ud = aws.buildUserData({ ...args, reuse: 'stop' });
+    const heredoc = extractRunnerDownloadHeredoc(ud);
+    const trapLine = "trap 'gh_runner_phone_home \"failed:${GH_RUNNER_STEP}\"' ERR";
+    // Scoped to this heredoc alone: the outer shell's 'preparing' trap and
+    // the register script's 'configuring' trap live elsewhere in the script
+    // and must not be able to satisfy this assertion.
+    expect(heredoc).toContain(trapLine);
+    expect(heredoc).toContain('GH_RUNNER_STEP=downloading');
+    // The step must be (re)tagged, and the trap (re)armed, before any of the
+    // curl/sha256sum/tar commands that can actually fail inside this shell.
+    expect(heredoc.indexOf('GH_RUNNER_STEP=downloading')).toBeLessThan(heredoc.indexOf(trapLine));
+    expect(heredoc.indexOf(trapLine)).toBeLessThan(heredoc.indexOf('curl -fsSLo'));
+  });
+
   test('installs a per-boot systemd service + IMDS-read re-registration hook', () => {
     const ud = aws.buildUserData({ ...args, reuse: 'stop' });
     expect(ud).toContain('/opt/gh-runner-register.sh');
