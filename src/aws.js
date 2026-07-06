@@ -1159,7 +1159,18 @@ async function warmStartInstance(instanceId, { userData, label }) {
   const client = ec2Client();
   await client.send(new ModifyInstanceAttributeCommand({
     InstanceId: instanceId,
-    UserData: { Value: Buffer.from(userData).toString('base64') },
+    // ModifyInstanceAttribute's UserData is a BLOB (BlobAttributeValue.Value:
+    // Uint8Array), NOT the plain string RunInstances takes. The SDK
+    // base64-encodes the blob's bytes for the EC2 query wire, so hand it the
+    // RAW user-data bytes. Pre-encoding to a base64 STRING here double-encodes
+    // it: the wire carries base64(base64(userData)), EC2 decodes that once and
+    // IMDS then serves the base64 TEXT instead of the script. The warm-restart
+    // register step reads that via IMDS, its `sed` finds no GH_REPO_URL='...'
+    // line, and config.sh aborts with "Invalid configuration provided for url"
+    // — every reuse: stop warm start failed registration this way. Cold
+    // launches were unaffected: RunInstances (startEc2Instance) correctly
+    // pre-encodes because its UserData field is a string, not a blob.
+    UserData: { Value: Buffer.from(userData) },
   }));
   await client.send(new CreateTagsCommand({
     Resources: [instanceId],
