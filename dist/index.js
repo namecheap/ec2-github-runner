@@ -105018,7 +105018,7 @@ function buildReusableUserData({ runnerVersion, owner, repo, label, githubRegist
     'UD=$(curl -fsS -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" "http://169.254.169.254/latest/user-data" 2>/dev/null || true)',
     'GH_TOKEN=$(printf \'%s\\n\' "$UD" | sed -n "s/^GH_TOKEN=\'\\(.*\\)\'$/\\1/p" | head -n1)',
     'GH_LABEL=$(printf \'%s\\n\' "$UD" | sed -n "s/^GH_LABEL=\'\\(.*\\)\'$/\\1/p" | head -n1)',
-    'GH_REPO_URL=$(printf \'%s\\n\' "$UD" | sed -n "s#^GH_REPO_URL=\'\\(.*\\)\'$#\\1#p" | head -n1)',
+    'GH_REPO_URL=$(printf \'%s\\n\' "$UD" | sed -n "s,^GH_REPO_URL=\'\\(.*\\)\'$,\\1,p" | head -n1)',
     'cd /home/runner/actions-runner',
     'rm -f .runner .credentials .credentials_rsaparams',
     'gh_runner_phone_home configuring',

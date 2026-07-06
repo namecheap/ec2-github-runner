@@ -1,6 +1,8 @@
 // Tests for warm-pool (reuse: stop) support: findStoppedPoolInstance strict
 // matching, warmStartInstance ordering, stop/cycle helpers, and the per-boot
 // re-registration hook in the generated user-data.
+const { execFileSync } = require('child_process');
+
 const mockSend = jest.fn();
 jest.mock('@aws-sdk/client-ec2', () => ({
   EC2Client: jest.fn(() => ({ send: mockSend })),
@@ -184,5 +186,36 @@ describe('buildUserData — reuse: stop variant', () => {
     const ud = aws.buildUserData({ ...args, reuse: 'terminate' });
     expect(ud).not.toContain('gh-runner.service');
     expect(ud).not.toContain('/opt/gh-runner-register.sh');
+  });
+
+  test('GH_REPO_URL extraction survives the sed-delimiter/$# collision (regression, #63)', () => {
+    const ud = aws.buildUserData({ ...args, reuse: 'stop' });
+
+    // Pull the real GH_REPO_URL=$(... sed ...) line straight out of the
+    // generated script, so this test exercises the actual shipped code
+    // rather than a hand-reimplementation of it.
+    const marker = 'GH_REPO_URL=$(printf';
+    const start = ud.indexOf(marker);
+    expect(start).toBeGreaterThan(-1);
+    const end = ud.indexOf('\n', start);
+    expect(end).toBeGreaterThan(start);
+    const extractionLine = ud.slice(start, end);
+
+    // Run that exact line under 'set -euo pipefail' with a controlled IMDS
+    // user-data value, the same shape the real registerScript reads via
+    // `UD=$(curl ... /latest/user-data)`. If the sed delimiter collides with
+    // bash's `$#` special parameter (as `#` does), the sed invocation is
+    // malformed, the pipeline fails, and the assignment aborts the script
+    // under `set -e` before GH_REPO_URL is ever printed.
+    const script = [
+      '#!/bin/bash',
+      'set -euo pipefail',
+      "UD=\"GH_REPO_URL='https://github.com/foo/bar'\"",
+      extractionLine,
+      'printf \'%s\' "$GH_REPO_URL"',
+    ].join('\n');
+
+    const result = execFileSync('bash', ['-c', script]).toString();
+    expect(result).toBe('https://github.com/foo/bar');
   });
 });
