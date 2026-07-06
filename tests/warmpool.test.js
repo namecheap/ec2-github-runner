@@ -87,7 +87,14 @@ describe('warmStartInstance', () => {
     expect(commandsSent()).toEqual(['ModifyInstanceAttribute', 'CreateTags', 'StartInstances']);
     const modify = mockSend.mock.calls[0][0];
     expect(modify.InstanceId).toBe('i-1');
-    expect(Buffer.from(modify.UserData.Value, 'base64').toString('utf8')).toContain('#!/bin/bash');
+    // UserData.Value must be the RAW user-data bytes, not a pre-base64'd
+    // string: it's a blob the SDK base64-encodes on the wire, so a base64
+    // string here double-encodes and IMDS serves base64 text (see
+    // warmStartInstance + the #66 serialization regression test). Assert the
+    // bytes decode straight back to the script — this fails against the old
+    // `.toString('base64')` value (a base64 string, not a Buffer/Uint8Array).
+    expect(Buffer.isBuffer(modify.UserData.Value) || modify.UserData.Value instanceof Uint8Array).toBe(true);
+    expect(Buffer.from(modify.UserData.Value).toString('utf8')).toBe('#!/bin/bash\ntrue');
     const tags = mockSend.mock.calls[1][0].Tags.map((t) => t.Key);
     expect(tags).toContain(aws.LABEL_TAG_KEY);
   });
