@@ -188,6 +188,36 @@ const CYCLES_TAG_KEY = 'ec2-github-runner:cycles';
 // Shared bootstrap shell helpers, emitted into any shell that phones home:
 // derive instance identity from IMDSv2 and tag the bootstrap phase (best-
 // effort — needs ec2:CreateTags, degrades silently otherwise).
+//
+// Failure detail capture: every shell that sources these helpers also
+// wires its own stderr through `tee` into a scratch file (GH_RUNNER_ERRLOG),
+// so gh_runner_phone_home_failed() can attach a short tail of whatever the
+// failing command actually printed to the "failed:<step>" tag — instead of
+// just the step name. Value shape: `failed:<step>` (unchanged, no detail
+// captured) or `failed:<step>:<detail>`. Step names never contain ':', so
+// src/wait.js splits on the FIRST ':' after the failed: prefix to recover
+// step vs. detail — safe even if <detail> itself contains colons (e.g. a
+// config.sh "error: ..." line). <detail> is sanitized to a single printable
+// line and the whole value is hard-capped at 256 chars, the EC2 tag-value
+// limit, regardless of how much garbage the failing command emitted.
+// gh_runner_phone_home() truncates the scratch file on every *successful*
+// (non-"failed:...") call — i.e. right as each new phase begins, before its
+// risky commands run — so a step's detail only ever reflects stderr from
+// that step's own commands, not noise left behind by an earlier `|| true`
+// -tolerated one (e.g. `mount ... || true` still writes to stderr even
+// though its exit code is swallowed).
+//
+// `tee`'s copy into the scratch file happens in a background process
+// substitution, so it can lag behind the failing command by a scheduling
+// tick — reading the file immediately in the ERR trap can race and see it
+// still empty. gh_runner_phone_home_failed() closes this shell's end of
+// that pipe (fd 2, about to go away anyway — the script is terminating)
+// and polls (bounded: at most ~200ms) for the tee process to exit, which it
+// only does once it has drained and flushed everything written to the
+// pipe. This is deliberately not a plain `wait` on the tee PID: `wait`
+// tracking a process-substitution PID needs bash >= 4.4, and an unbounded
+// wait risks hanging the trap if tee's write end ever blocks; `kill -0` for
+// liveness works on any bash and the loop always terminates.
 const PHONE_HOME_HELPERS = [
   'gh_runner_imds() {',
   '  local token',
@@ -196,9 +226,38 @@ const PHONE_HOME_HELPERS = [
   '}',
   'GH_RUNNER_IID=$(gh_runner_imds instance-id)',
   'GH_RUNNER_REGION=$(gh_runner_imds placement/region)',
+  '# Tee this shell\'s stderr into a scratch file (best-effort) so a failing',
+  '# command\'s own error text can be recovered by gh_runner_phone_home_failed.',
+  '# Guarded end-to-end: an empty GH_RUNNER_ERRLOG (mktemp unavailable) just',
+  '# skips detail capture, same as any other best-effort tagging failure here.',
+  'GH_RUNNER_ERRLOG=$(mktemp /tmp/gh-runner-err.XXXXXX 2>/dev/null || true)',
+  'GH_RUNNER_ERRTEE_PID=""',
+  'if [ -n "$GH_RUNNER_ERRLOG" ]; then exec 2> >(tee -a "$GH_RUNNER_ERRLOG" >&2) || true; GH_RUNNER_ERRTEE_PID=$!; fi',
   'gh_runner_phone_home() {',
+  '  case "$1" in',
+  '    failed:*) : ;;',
+  '    *) [ -n "${GH_RUNNER_ERRLOG:-}" ] && : > "$GH_RUNNER_ERRLOG" 2>/dev/null || true ;;',
+  '  esac',
   '  [ -n "$GH_RUNNER_IID" ] && [ -n "$GH_RUNNER_REGION" ] || return 0',
   `  aws ec2 create-tags --region "$GH_RUNNER_REGION" --resources "$GH_RUNNER_IID" --tags "Key=${BOOTSTRAP_TAG_KEY},Value=$1" >/dev/null 2>&1 || true`,
+  '}',
+  'gh_runner_phone_home_failed() {',
+  '  local step="$1" detail="" value waited=0',
+  '  if [ -n "${GH_RUNNER_ERRTEE_PID:-}" ]; then',
+  '    exec 2>/dev/null',
+  '    while [ "$waited" -lt 10 ] && kill -0 "$GH_RUNNER_ERRTEE_PID" 2>/dev/null; do',
+  '      sleep 0.02',
+  '      waited=$((waited + 1))',
+  '    done',
+  '  fi',
+  '  if [ -n "${GH_RUNNER_ERRLOG:-}" ] && [ -s "$GH_RUNNER_ERRLOG" ]; then',
+  '    detail=$(tr "\\n\\r\\t" "   " < "$GH_RUNNER_ERRLOG" 2>/dev/null | tr -c "[:print:]" " " | tail -c 150 | tr -s " ")',
+  '    detail="${detail# }"',
+  '    detail="${detail% }"',
+  '  fi',
+  '  value="failed:${step}"',
+  '  [ -n "$detail" ] && value="failed:${step}:${detail}"',
+  '  gh_runner_phone_home "${value:0:256}"',
   '}',
 ];
 
@@ -363,7 +422,7 @@ function buildReusableUserData({ runnerVersion, owner, repo, label, githubRegist
     'set -euo pipefail',
     ...PHONE_HOME_HELPERS,
     'GH_RUNNER_STEP=configuring',
-    'trap \'gh_runner_phone_home "failed:${GH_RUNNER_STEP}"\' ERR',
+    'trap \'gh_runner_phone_home_failed "${GH_RUNNER_STEP}"\' ERR',
     'IMDS_TOKEN=$(curl -fsS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 120" 2>/dev/null || true)',
     'UD=$(curl -fsS -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" "http://169.254.169.254/latest/user-data" 2>/dev/null || true)',
     'GH_TOKEN=$(printf \'%s\\n\' "$UD" | sed -n "s/^GH_TOKEN=\'\\(.*\\)\'$/\\1/p" | head -n1)',
@@ -397,7 +456,7 @@ function buildReusableUserData({ runnerVersion, owner, repo, label, githubRegist
     '# --- ec2-github-runner: warm-pool bootstrap (reuse: stop) -----------',
     ...PHONE_HOME_HELPERS,
     'GH_RUNNER_STEP=preparing',
-    "trap 'gh_runner_phone_home \"failed:${GH_RUNNER_STEP}\"' ERR",
+    "trap 'gh_runner_phone_home_failed \"${GH_RUNNER_STEP}\"' ERR",
     '',
     ...ttlLines,
     '# One-time setup (idempotent across warm restarts).',
@@ -422,7 +481,7 @@ function buildReusableUserData({ runnerVersion, owner, repo, label, githubRegist
     'set -euo pipefail',
     ...PHONE_HOME_HELPERS,
     'GH_RUNNER_STEP=downloading',
-    "trap 'gh_runner_phone_home \"failed:${GH_RUNNER_STEP}\"' ERR",
+    "trap 'gh_runner_phone_home_failed \"${GH_RUNNER_STEP}\"' ERR",
     'gh_runner_phone_home downloading',
     'cd "$HOME"',
     'mkdir -p actions-runner && cd actions-runner',
@@ -496,6 +555,14 @@ function buildReusableUserData({ runnerVersion, owner, repo, label, githubRegist
 //   registration timeout. Tagging is best-effort: it needs
 //   `ec2:CreateTags` on the instance profile and degrades to
 //   timeout-only detection when absent (every write is `|| true`).
+//
+// - Failure detail capture: the `failed:<step>` tag can carry a
+//   trailing `:<detail>` — a sanitized, single-line, ≤150-char tail of
+//   whatever the failing command wrote to stderr (see PHONE_HOME_HELPERS
+//   and gh_runner_phone_home_failed()) — so a bootstrap failure surfaces
+//   the actual error (e.g. config.sh's stderr) without needing live
+//   SSH/SSM access. src/wait.js splits on the first ':' after the
+//   prefix and stays backward compatible with the no-detail shape.
 function buildUserData({ runnerVersion, owner, repo, label, githubRegistrationToken, shaX64, shaArm64, maxLifetimeMinutes, preRunnerScript, reuse }) {
   // User-supplied pre-runner-script (#46): injected verbatim into the outer
   // (root) shell before runner configuration, under the same set -euo
@@ -541,7 +608,7 @@ function buildUserData({ runnerVersion, owner, repo, label, githubRegistrationTo
     '# --- ec2-github-runner: bootstrap diagnostics (phone-home) ----------',
     ...PHONE_HOME_HELPERS,
     'GH_RUNNER_STEP=preparing',
-    "trap 'gh_runner_phone_home \"failed:${GH_RUNNER_STEP}\"' ERR",
+    "trap 'gh_runner_phone_home_failed \"${GH_RUNNER_STEP}\"' ERR",
     '',
     ...ttlLines,
     '# Root-required setup.',
@@ -568,7 +635,7 @@ function buildUserData({ runnerVersion, owner, repo, label, githubRegistrationTo
     'set -euo pipefail',
     ...PHONE_HOME_HELPERS,
     'GH_RUNNER_STEP=downloading',
-    "trap 'gh_runner_phone_home \"failed:${GH_RUNNER_STEP}\"' ERR",
+    "trap 'gh_runner_phone_home_failed \"${GH_RUNNER_STEP}\"' ERR",
     'gh_runner_phone_home downloading',
     'cd "$HOME"',
     'mkdir -p actions-runner && cd actions-runner',

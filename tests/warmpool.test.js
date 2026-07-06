@@ -158,7 +158,7 @@ describe('buildUserData — reuse: stop variant', () => {
   test('arms an ERR trap for the downloading phase inside the RUNNER_DOWNLOAD heredoc (regression, #61)', () => {
     const ud = aws.buildUserData({ ...args, reuse: 'stop' });
     const heredoc = extractRunnerDownloadHeredoc(ud);
-    const trapLine = "trap 'gh_runner_phone_home \"failed:${GH_RUNNER_STEP}\"' ERR";
+    const trapLine = "trap 'gh_runner_phone_home_failed \"${GH_RUNNER_STEP}\"' ERR";
     // Scoped to this heredoc alone: the outer shell's 'preparing' trap and
     // the register script's 'configuring' trap live elsewhere in the script
     // and must not be able to satisfy this assertion.

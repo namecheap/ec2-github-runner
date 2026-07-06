@@ -1,8 +1,13 @@
 const core = require('@actions/core');
 const log = require('./log');
 
-// Terminal bootstrap phone-home states carry a `failed:<step>` value; see
-// src/aws.js buildUserData() for the producing side.
+// Terminal bootstrap phone-home states carry a `failed:<step>` value, or
+// `failed:<step>:<detail>` when the failing command's stderr was captured
+// (see PHONE_HOME_HELPERS / gh_runner_phone_home_failed() in src/aws.js).
+// Step names never contain ':', so the FIRST ':' after this prefix is the
+// step/detail boundary — safe even when <detail> itself contains colons
+// (e.g. a captured "config.sh: error: ..." line). A value with no second
+// ':' is the old/no-detail shape and is fully backward compatible.
 const FAILED_PREFIX = 'failed:';
 
 // Wait for the EC2 runner to come online, watching two signals in lockstep:
@@ -41,11 +46,18 @@ async function waitForRunnerReady(deps, opts = {}) {
     // 1. Fast-fail on a phoned-home bootstrap failure.
     const status = await getBootstrapStatus();
     if (typeof status === 'string' && status.startsWith(FAILED_PREFIX)) {
-      const step = status.slice(FAILED_PREFIX.length);
-      log.error('wait_for_runner', { outcome: 'bootstrap_failed', step });
-      core.error(`EC2 runner bootstrap failed during the "${step}" step`);
-      const error = new Error(`EC2 runner bootstrap failed during the "${step}" step. See the captured console output below.`);
+      const rest = status.slice(FAILED_PREFIX.length);
+      const sepIndex = rest.indexOf(':');
+      const step = sepIndex === -1 ? rest : rest.slice(0, sepIndex);
+      const detail = sepIndex === -1 ? '' : rest.slice(sepIndex + 1);
+      const detailSuffix = detail ? ` — ${detail}` : '';
+      log.error('wait_for_runner', { outcome: 'bootstrap_failed', step, detail: detail || null });
+      core.error(`EC2 runner bootstrap failed during the "${step}" step${detailSuffix}`);
+      const error = new Error(`EC2 runner bootstrap failed during the "${step}" step${detailSuffix}. See the captured console output below.`);
       error.bootstrapStep = step;
+      if (detail) {
+        error.bootstrapDetail = detail;
+      }
       throw error;
     }
 

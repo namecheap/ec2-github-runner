@@ -44,12 +44,20 @@ describe('buildUserData', () => {
     }
   });
 
-  test('installs an ERR trap that phones home failed:<step> in both shells', () => {
+  test('installs an ERR trap that phones home failed:<step> (+ detail) in both shells', () => {
     const ud = buildUserData(args);
-    const trapLine = "trap 'gh_runner_phone_home \"failed:${GH_RUNNER_STEP}\"' ERR";
+    const trapLine = "trap 'gh_runner_phone_home_failed \"${GH_RUNNER_STEP}\"' ERR";
     // Once in the outer (root) shell, once in the inner (runner-user) shell.
     const occurrences = ud.split(trapLine).length - 1;
     expect(occurrences).toBe(2);
+  });
+
+  test('wires stderr through tee into a scratch file for failure-detail capture', () => {
+    const ud = buildUserData(args);
+    // Once in the outer (root) shell, once in the inner (runner-user) shell.
+    expect(ud.split('GH_RUNNER_ERRLOG=$(mktemp').length - 1).toBe(2);
+    expect(ud.split('exec 2> >(tee -a "$GH_RUNNER_ERRLOG" >&2)').length - 1).toBe(2);
+    expect(ud.split('gh_runner_phone_home_failed() {').length - 1).toBe(2);
   });
 
   test('writes the bootstrap tag via ec2 create-tags, best-effort', () => {
