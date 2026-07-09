@@ -4,6 +4,24 @@ All notable changes to this action are documented here. This project follows
 [Semantic Versioning](https://semver.org/). The moving major tag (e.g. `v4`)
 always points at the latest release in that major line.
 
+## [Unreleased]
+
+### Fixed
+
+- **Warm-restart registration race** (#67): on a `reuse: stop` warm restart the
+  runner could re-register and report `online` on the very first poll
+  (`elapsed_s=0`) and then drop before the dependent job was scheduled — the
+  start step exited green, the job sat `queued` forever, and the gated `stop`
+  job never fired, leaking a running instance that kept holding its EIP. The
+  start step now requires the registration to stay online across several
+  consecutive polls before declaring the runner ready (3 on a warm restart, 2
+  on a cold launch); a registration that flaps within that window fails the
+  start step — routing into the existing console-output capture and cleanup —
+  instead of returning a false success. A flap is logged
+  (`wait_for_runner … outcome:flap`) so the failure mode is debuggable. Docs
+  now stress scheduling the `cleanup` reaper for warm pools, since it is the
+  backstop that reaps a leaked *running* instance whose runner never came up.
+
 ## [4.0.0] - 2026-07-02
 
 A capability wave across cost, reliability, reach, and toil. 10 features, each

@@ -11,6 +11,7 @@ const noSleep = () => Promise.resolve();
 
 beforeEach(() => {
   core.error.mockClear();
+  core.warning.mockClear();
 });
 
 describe('waitForRunnerReady', () => {
@@ -149,6 +150,86 @@ describe('waitForRunnerReady', () => {
       expect(caught.bootstrapDetail).toBeUndefined();
       // No " — " detail suffix leaks into the message when there is no detail.
       expect(caught.message).toBe('EC2 runner bootstrap failed during the "downloading" step. See the captured console output below.');
+    });
+  });
+
+  // Stability confirmation (confirmChecks): a single online poll is necessary
+  // but not sufficient. On a warm restart the runner can report online on the
+  // first poll and then drop before the dependent job is scheduled (issue
+  // #67); requiring N CONSECUTIVE online polls turns that flap into a failure
+  // here instead of a downstream job queued forever.
+  describe('online-stability confirmation (confirmChecks)', () => {
+    test('requires confirmChecks consecutive online polls before resolving', async () => {
+      const getBootstrapStatus = jest.fn().mockResolvedValue(null);
+      const isRunnerOnline = jest.fn().mockResolvedValue(true);
+
+      await waitForRunnerReady(
+        { getBootstrapStatus, isRunnerOnline, sleep: noSleep },
+        { quietSeconds: 0, intervalSeconds: 1, confirmChecks: 3 },
+      );
+
+      // An instant first-poll match is no longer terminal: it must be
+      // confirmed by two further consecutive online polls.
+      expect(isRunnerOnline).toHaveBeenCalledTimes(3);
+    });
+
+    test('a flap resets the streak, so an instant online then offline does not count as ready', async () => {
+      const getBootstrapStatus = jest.fn().mockResolvedValue(null);
+      // online (streak 1) -> offline (flap, reset) -> online, online, online
+      const isRunnerOnline = jest.fn()
+        .mockResolvedValueOnce(true)
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(true)
+        .mockResolvedValueOnce(true)
+        .mockResolvedValueOnce(true);
+
+      await waitForRunnerReady(
+        { getBootstrapStatus, isRunnerOnline, sleep: noSleep },
+        { quietSeconds: 0, intervalSeconds: 1, confirmChecks: 3 },
+      );
+
+      expect(isRunnerOnline).toHaveBeenCalledTimes(5);
+      // The flap is surfaced in the log so the failure mode is debuggable.
+      expect(core.warning).toHaveBeenCalledWith(expect.stringContaining('offline while confirming stability'));
+    });
+
+    test('an unstable (perpetually flapping) registration times out rather than resolving', async () => {
+      const getBootstrapStatus = jest.fn().mockResolvedValue(null);
+      // Alternating online/offline never reaches 3 in a row.
+      let poll = 0;
+      const isRunnerOnline = jest.fn().mockImplementation(() => Promise.resolve(poll++ % 2 === 0));
+
+      await expect(
+        waitForRunnerReady(
+          { getBootstrapStatus, isRunnerOnline, sleep: noSleep },
+          { quietSeconds: 0, intervalSeconds: 10, timeoutMinutes: 0.5, confirmChecks: 3 },
+        ),
+      ).rejects.toMatchObject({ timedOut: true });
+    });
+
+    test('a bootstrap failure during confirmation still fast-fails', async () => {
+      // Online on the first poll (streak 1), then cloud-init phones a failure
+      // before the streak completes — the fast-fail must win.
+      const getBootstrapStatus = jest.fn()
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce('failed:configuring');
+      const isRunnerOnline = jest.fn().mockResolvedValue(true);
+
+      await expect(
+        waitForRunnerReady(
+          { getBootstrapStatus, isRunnerOnline, sleep: noSleep },
+          { quietSeconds: 0, intervalSeconds: 1, confirmChecks: 3 },
+        ),
+      ).rejects.toMatchObject({ bootstrapStep: 'configuring' });
+    });
+
+    test('confirmChecks defaults to 1 (legacy accept-first-online)', async () => {
+      const getBootstrapStatus = jest.fn().mockResolvedValue(null);
+      const isRunnerOnline = jest.fn().mockResolvedValue(true);
+
+      await waitForRunnerReady({ getBootstrapStatus, isRunnerOnline, sleep: noSleep }, { quietSeconds: 0 });
+
+      expect(isRunnerOnline).toHaveBeenCalledTimes(1);
     });
   });
 });
