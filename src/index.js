@@ -49,6 +49,16 @@ function setOutput(label, placement) {
   core.setOutput('market-type-used', marketType);
 }
 
+// How many consecutive online polls the wait loop must observe before it
+// declares the runner ready (see waitForRunnerReady's confirmChecks). Warm
+// restarts get a longer confirmation window: a reused instance can re-register
+// and report online on the very first poll and then drop before the dependent
+// job is scheduled, which strands that job in `queued` forever (issue #67).
+// Cold launches also confirm (one extra poll) to shrink the same flap window
+// on a fresh registration.
+const WARM_CONFIRM_CHECKS = 3;
+const COLD_CONFIRM_CHECKS = 2;
+
 // Warm-pool fast path: reuse a stopped pool instance (count 1 only). Returns
 // a placement, or null to fall back to a cold launch (empty pool or a failed
 // start — the cold launch then joins the pool).
@@ -100,13 +110,19 @@ async function start() {
 
     // Watch the bootstrap phone-home tags and GitHub registration together.
     // The batch is ready only when ALL N runners are online; a bootstrap
-    // failure on ANY instance fails fast. On failure or timeout, capture the
-    // console output of every instance and (by default) terminate them all —
-    // no half-fleet is left leaking billing. The token is redacted.
+    // failure on ANY instance fails fast. Registration must hold online for
+    // confirmChecks consecutive polls so a warm restart's flap (issue #67)
+    // fails here rather than stranding the downstream job. On failure or
+    // timeout, capture the console output of every instance and (by default)
+    // terminate them all — no half-fleet is left leaking billing. The token
+    // is redacted.
+    const warmRestart = placement.marketType === 'reused';
     try {
       await waitForRunnerReady({
         getBootstrapStatus: () => aws.getBatchBootstrapStatus(instanceIds),
         isRunnerOnline: async () => (await gh.countOnlineRunners(label)) >= instanceIds.length,
+      }, {
+        confirmChecks: warmRestart ? WARM_CONFIRM_CHECKS : COLD_CONFIRM_CHECKS,
       });
     } catch (waitError) {
       await aws.handleStartFailure(instanceIds, { redactValues: [githubRegistrationToken] });

@@ -106743,14 +106743,26 @@ const FAILED_PREFIX = 'failed:';
 //      `failed:<step>` value means cloud-init aborted — fail fast within one
 //      poll interval, naming the step, instead of waiting out the full
 //      registration timeout.
-//   2. GitHub runner registration. Success is authoritative here: the runner
-//      showing up as `online` is what lets downstream jobs run.
+//   2. GitHub runner registration. Success requires the runner to report
+//      `online` on `confirmChecks` CONSECUTIVE polls, not just once — a
+//      single online observation is necessary but not sufficient. On a warm
+//      restart (reuse:stop) the runner can report online on the very first
+//      poll (elapsed_s=0) and then drop before the dependent job is even
+//      scheduled; the job then sits queued forever and the consumer's
+//      gated stop job never fires, leaking a running instance and its EIP
+//      (see issue #67). Confirming the registration stays online turns that
+//      flap into a start-step failure the caller can act on, instead of a
+//      false success.
 //
 // All I/O and timing are injected so the loop is unit-testable without real
 // AWS/GitHub calls or wall-clock sleeps:
 //   - deps.getBootstrapStatus(): Promise<string|null>
 //   - deps.isRunnerOnline():     Promise<boolean>
 //   - deps.sleep(ms):            Promise<void> (defaults to setTimeout)
+//
+// opts.confirmChecks (default 1) is how many consecutive online polls are
+// required before success. 1 keeps the legacy accept-first-online behaviour;
+// the start action passes a higher value on warm restarts (see src/index.js).
 //
 // Throws on `failed:<step>` (err.bootstrapStep set) or on timeout
 // (err.timedOut set) so the caller can capture diagnostics and clean up.
@@ -106761,6 +106773,7 @@ async function waitForRunnerReady(deps, opts = {}) {
   const timeoutMinutes = opts.timeoutMinutes ?? 5;
   const intervalSeconds = opts.intervalSeconds ?? 10;
   const quietSeconds = opts.quietSeconds ?? 30;
+  const confirmChecks = Math.max(1, opts.confirmChecks ?? 1);
 
   core.info(`Waiting ${quietSeconds}s for the AWS EC2 instance to bootstrap and register as a self-hosted runner`);
   await sleep(quietSeconds * 1000);
@@ -106768,6 +106781,10 @@ async function waitForRunnerReady(deps, opts = {}) {
 
   const deadlineSeconds = timeoutMinutes * 60;
   let waitedSeconds = 0;
+  // Count of consecutive polls that observed the runner online. Resets to 0
+  // on any poll that does not (a flap), so only a sustained registration
+  // reaches confirmChecks.
+  let onlineStreak = 0;
 
   for (;;) {
     // 1. Fast-fail on a phoned-home bootstrap failure.
@@ -106788,16 +106805,30 @@ async function waitForRunnerReady(deps, opts = {}) {
       throw error;
     }
 
-    // 2. Success when the runner has registered and is online.
+    // 2. Success requires confirmChecks CONSECUTIVE online observations, so a
+    //    registration that flaps offline within seconds (the issue-#67 warm-
+    //    restart race) never counts as ready.
     if (await isRunnerOnline()) {
-      log.info('wait_for_runner', { outcome: 'online', elapsed_s: waitedSeconds });
-      core.info('GitHub self-hosted runner is registered and ready to use');
-      return;
+      onlineStreak += 1;
+      if (onlineStreak >= confirmChecks) {
+        log.info('wait_for_runner', { outcome: 'online', elapsed_s: waitedSeconds, confirm_checks: confirmChecks });
+        core.info('GitHub self-hosted runner is registered and ready to use');
+        return;
+      }
+      log.debug('wait_for_runner_confirm', { elapsed_s: waitedSeconds, streak: onlineStreak, needed: confirmChecks });
+      core.info(`GitHub self-hosted runner is online; confirming stability (${onlineStreak}/${confirmChecks})`);
+    } else if (onlineStreak > 0) {
+      // The runner was online on a prior poll and now isn't: the registration
+      // flapped. Reset the streak and surface it — on the warm-restart path
+      // this is the only instance-side-adjacent evidence in the workflow log.
+      log.warn('wait_for_runner', { outcome: 'flap', elapsed_s: waitedSeconds, confirmed: onlineStreak, needed: confirmChecks });
+      core.warning('GitHub self-hosted runner went offline while confirming stability; continuing to wait for a stable registration');
+      onlineStreak = 0;
     }
 
     // 3. Bounded wait — give up after the timeout.
     if (waitedSeconds >= deadlineSeconds) {
-      log.error('wait_for_runner', { outcome: 'timeout', timeout_minutes: timeoutMinutes });
+      log.error('wait_for_runner', { outcome: 'timeout', timeout_minutes: timeoutMinutes, confirm_checks: confirmChecks, online_streak: onlineStreak });
       const error = new Error(
         `A timeout of ${timeoutMinutes} minutes is exceeded. Your AWS EC2 instance was not able to register itself in GitHub as a new self-hosted runner.`,
       );
@@ -106805,7 +106836,7 @@ async function waitForRunnerReady(deps, opts = {}) {
       throw error;
     }
 
-    log.debug('wait_for_runner_poll', { elapsed_s: waitedSeconds, bootstrap: status || null });
+    log.debug('wait_for_runner_poll', { elapsed_s: waitedSeconds, bootstrap: status || null, online_streak: onlineStreak });
     core.info('Checking...');
     await sleep(intervalSeconds * 1000);
     waitedSeconds += intervalSeconds;
@@ -111695,6 +111726,16 @@ function setOutput(label, placement) {
   core.setOutput('market-type-used', marketType);
 }
 
+// How many consecutive online polls the wait loop must observe before it
+// declares the runner ready (see waitForRunnerReady's confirmChecks). Warm
+// restarts get a longer confirmation window: a reused instance can re-register
+// and report online on the very first poll and then drop before the dependent
+// job is scheduled, which strands that job in `queued` forever (issue #67).
+// Cold launches also confirm (one extra poll) to shrink the same flap window
+// on a fresh registration.
+const WARM_CONFIRM_CHECKS = 3;
+const COLD_CONFIRM_CHECKS = 2;
+
 // Warm-pool fast path: reuse a stopped pool instance (count 1 only). Returns
 // a placement, or null to fall back to a cold launch (empty pool or a failed
 // start — the cold launch then joins the pool).
@@ -111746,13 +111787,19 @@ async function start() {
 
     // Watch the bootstrap phone-home tags and GitHub registration together.
     // The batch is ready only when ALL N runners are online; a bootstrap
-    // failure on ANY instance fails fast. On failure or timeout, capture the
-    // console output of every instance and (by default) terminate them all —
-    // no half-fleet is left leaking billing. The token is redacted.
+    // failure on ANY instance fails fast. Registration must hold online for
+    // confirmChecks consecutive polls so a warm restart's flap (issue #67)
+    // fails here rather than stranding the downstream job. On failure or
+    // timeout, capture the console output of every instance and (by default)
+    // terminate them all — no half-fleet is left leaking billing. The token
+    // is redacted.
+    const warmRestart = placement.marketType === 'reused';
     try {
       await waitForRunnerReady({
         getBootstrapStatus: () => aws.getBatchBootstrapStatus(instanceIds),
         isRunnerOnline: async () => (await gh.countOnlineRunners(label)) >= instanceIds.length,
+      }, {
+        confirmChecks: warmRestart ? WARM_CONFIRM_CHECKS : COLD_CONFIRM_CHECKS,
       });
     } catch (waitError) {
       await aws.handleStartFailure(instanceIds, { redactValues: [githubRegistrationToken] });
