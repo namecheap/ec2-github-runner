@@ -104662,6 +104662,7 @@ const {
   ModifyInstanceAttributeCommand,
   AssociateAddressCommand,
   waitUntilInstanceRunning,
+  waitUntilInstanceStopped,
 } = __nccwpck_require__(5193);
 const fs = __nccwpck_require__(9896);
 const core = __nccwpck_require__(7484);
@@ -105835,11 +105836,32 @@ async function warmStartInstance(instanceId, { userData, label }) {
 }
 
 // Stop (not terminate) an instance so it can be reused from the pool.
+//
+// Blocks until the instance actually reaches the `stopped` state before
+// returning. StopInstances alone only moves it to `stopping`, and a warm-pool
+// lookup that runs during that window (findStoppedPoolInstance filters on
+// instance-state-name=stopped) sees an empty pool and cold-launches a
+// duplicate instance the reaper won't drain until its stopped-max-age passes.
+// Waiting here makes "mode: stop finished" imply "instance is reusable", which
+// is the serialization boundary queued follow-up workflow runs rely on.
 async function stopInstanceById(instanceId) {
   const client = ec2Client();
   await withRetry('stop_instance', () => client.send(new StopInstancesCommand({ InstanceIds: [instanceId] })));
   log.info('stop_instance', { instance_id: instanceId });
-  core.info(`AWS EC2 instance ${instanceId} is stopped (warm pool)`);
+  const start = Date.now();
+  log.info('wait_for_instance_stopped', { instance_id: instanceId });
+  try {
+    await waitUntilInstanceStopped(
+      { client, maxWaitTime: 300 },
+      { InstanceIds: [instanceId] },
+    );
+    log.info('wait_for_instance_stopped', { instance_id: instanceId, elapsed_ms: Date.now() - start });
+    core.info(`AWS EC2 instance ${instanceId} is stopped (warm pool)`);
+  } catch (error) {
+    log.error('wait_for_instance_stopped', { instance_id: instanceId, error: error.name, message: error.message });
+    core.error(`AWS EC2 instance ${instanceId} did not reach the stopped state within the wait window`);
+    throw error;
+  }
 }
 
 // Read the reuse-cycle counter tag for an instance (0 when absent).

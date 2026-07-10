@@ -18,6 +18,7 @@ jest.mock('@aws-sdk/client-ec2', () => ({
   ModifyInstanceAttributeCommand: jest.fn((p) => ({ __command: 'ModifyInstanceAttribute', ...p })),
   AssociateAddressCommand: jest.fn((p) => ({ __command: 'AssociateAddress', ...p })),
   waitUntilInstanceRunning: jest.fn(),
+  waitUntilInstanceStopped: jest.fn(),
 }));
 jest.mock('../src/retry', () => ({ withRetry: (_step, fn) => fn() }));
 jest.mock('../src/config', () => ({
@@ -101,11 +102,27 @@ describe('warmStartInstance', () => {
 });
 
 describe('stopInstanceById', () => {
-  test('sends StopInstances', async () => {
+  const { waitUntilInstanceStopped } = require('@aws-sdk/client-ec2');
+
+  beforeEach(() => waitUntilInstanceStopped.mockReset());
+
+  test('sends StopInstances, then waits for the stopped state', async () => {
     mockSend.mockResolvedValue({});
+    waitUntilInstanceStopped.mockResolvedValueOnce({ state: 'SUCCESS' });
     await aws.stopInstanceById('i-9');
     expect(commandsSent()).toEqual(['StopInstances']);
     expect(mockSend.mock.calls[0][0].InstanceIds).toEqual(['i-9']);
+    // The waiter is the whole point: returning at `stopping` lets a queued
+    // follow-up run see an empty pool and cold-launch a duplicate instance.
+    expect(waitUntilInstanceStopped).toHaveBeenCalledTimes(1);
+    expect(waitUntilInstanceStopped.mock.calls[0][1]).toEqual({ InstanceIds: ['i-9'] });
+  });
+
+  test('throws when the instance never reaches stopped', async () => {
+    mockSend.mockResolvedValue({});
+    waitUntilInstanceStopped.mockRejectedValueOnce(new Error('TimeoutError'));
+    await expect(aws.stopInstanceById('i-9')).rejects.toThrow('TimeoutError');
+    expect(commandsSent()).toEqual(['StopInstances']);
   });
 });
 
