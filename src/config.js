@@ -29,7 +29,7 @@ class Config {
       reuseMaxCycles: core.getInput('reuse-max-cycles') || '20',
       reaperStoppedMaxAge: core.getInput('reaper-stopped-max-age') || '1440',
       iamRoleName: core.getInput('iam-role-name'),
-      runnerVersion: core.getInput('runner-version') || '2.335.1',
+      runnerVersion: core.getInput('runner-version') || '2.336.0',
       architecture: core.getInput('architecture') || 'x64',
       httpTokens: core.getInput('http-tokens') || 'required',
       encryptEbs: core.getInput('encrypt-ebs') || 'false',
