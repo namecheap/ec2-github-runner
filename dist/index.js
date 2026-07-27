@@ -106122,7 +106122,7 @@ class Config {
       reuseMaxCycles: core.getInput('reuse-max-cycles') || '20',
       reaperStoppedMaxAge: core.getInput('reaper-stopped-max-age') || '1440',
       iamRoleName: core.getInput('iam-role-name'),
-      runnerVersion: core.getInput('runner-version') || '2.335.1',
+      runnerVersion: core.getInput('runner-version') || '2.336.0',
       architecture: core.getInput('architecture') || 'x64',
       httpTokens: core.getInput('http-tokens') || 'required',
       encryptEbs: core.getInput('encrypt-ebs') || 'false',
@@ -106600,9 +106600,12 @@ module.exports = {
 // this table and upstream is caught at code-review time, not at runtime.
 //
 // Sources:
+//   https://github.com/actions/runner/releases/tag/v2.336.0
 //   https://github.com/actions/runner/releases/tag/v2.335.1
 
 const CHECKSUMS = {
+  'x64-2.336.0':   '04cf0be1aff4c3ec3554466c39124ca250e3effd8873bb7e8d68535aa9505d5d',
+  'arm64-2.336.0': '58b758e420b87093fbd4bfddd368074960053e2f1388f01848c82624b90f27d1',
   // v2.335.1 — pinned default as of 2026-06-17. Bumped from 2.333.1, which
   // GitHub stops allowing to run jobs on 2026-06-23.
   'x64-2.335.1':   '4ef2f25285f0ae4477f1fe1e346db76d2f3ebf03824e2ddd1973a2819bf6c8cf',

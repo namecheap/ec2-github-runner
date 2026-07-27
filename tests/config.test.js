@@ -359,9 +359,9 @@ describe('Config — max-lifetime-minutes input', () => {
 });
 
 describe('Config — runner-version input', () => {
-  test('defaults to 2.335.1 when unset', () => {
+  test('defaults to 2.336.0 when unset', () => {
     const config = loadConfig(startModeInputs);
-    expect(config.input.runnerVersion).toBe('2.335.1');
+    expect(config.input.runnerVersion).toBe('2.336.0');
   });
 
   test('honors an explicit override', () => {
