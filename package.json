@@ -18,7 +18,7 @@
     "package": "ncc build ./src/index.js"
   },
   "overrides": {
-    "undici": "^6.27.0",
+    "undici": "^6.28.0",
     "test-exclude": "^8.0.0"
   },
   "dependencies": {
