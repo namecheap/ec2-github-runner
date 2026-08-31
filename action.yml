@@ -140,7 +140,7 @@ inputs:
       tarball's SHA-256 against that table before extraction). To
       override, add the corresponding hash to the table in a PR.
     required: false
-    default: '2.336.0'
+    default: '2.337.0'
   architecture:
     description: >-
       Used only with the 'start' mode. CPU architecture of the runner:
