@@ -21,10 +21,13 @@
 // this table and upstream is caught at code-review time, not at runtime.
 //
 // Sources:
+//   https://github.com/actions/runner/releases/tag/v2.337.0
 //   https://github.com/actions/runner/releases/tag/v2.336.0
 //   https://github.com/actions/runner/releases/tag/v2.335.1
 
 const CHECKSUMS = {
+  'x64-2.337.0':   '70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613',
+  'arm64-2.337.0': '9b1dc70626422526e3c94767cf024896beb15da5342a3f4819bf2feac13e0393',
   'x64-2.336.0':   '04cf0be1aff4c3ec3554466c39124ca250e3effd8873bb7e8d68535aa9505d5d',
   'arm64-2.336.0': '58b758e420b87093fbd4bfddd368074960053e2f1388f01848c82624b90f27d1',
   // v2.335.1 — pinned default as of 2026-06-17. Bumped from 2.333.1, which
