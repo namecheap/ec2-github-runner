@@ -6,8 +6,44 @@ always points at the latest release in that major line.
 
 ## [Unreleased]
 
+## [4.0.3] - 2026-09-18
+
+Housekeeping: a newer bundled runner, and every open Dependabot and
+code-scanning alert closed. No behaviour change to the action's inputs or
+outputs.
+
 ### Fixed
 
+- **Default `actions/runner` bumped to 2.337.0** (#70, #75, via `bump-runner`).
+  A launch that does not pin `runner-version` gets the newer agent and its
+  pinned-checksum verification.
+
+### Security
+
+- **Dependabot and code-scanning alerts resolved** (#74). Transitive dev
+  dependency `js-yaml` 3.14.2 -> 3.15.1 (GHSA-5p4m-2wfm-xmqj,
+  GHSA-52cp-r559-cp3m, GHSA-h67p-54hq-rp68), and a least-privilege
+  `permissions: contents: read` block on the PR workflow. Both are outside the
+  bundle: `dist/` rebuilt byte-identical.
+- `undici` 6.27.0 -> 6.28.0 (#71) and `brace-expansion` (#72).
+
+### Documentation
+
+- **Security policy** (#73): how to report a vulnerability, and which versions
+  are supported.
+
+### Internal
+
+- Dev-dependency bumps: `browserslist` 4.28.2 -> 4.28.9 (#77), `js-yaml`
+  3.15.1 -> 3.15.2 (#78).
+
+## [4.0.2] - 2026-07-10
+
+### Fixed
+
+- **`mode: stop` returned before the instance had stopped** (#69): the stop step
+  issued `StopInstances` and returned, so a warm pool's next start could race a
+  still-stopping instance. It now waits for the `stopped` state.
 - **Warm-restart registration race** (#67): on a `reuse: stop` warm restart the
   runner could re-register and report `online` on the very first poll
   (`elapsed_s=0`) and then drop before the dependent job was scheduled — the
@@ -21,6 +57,15 @@ always points at the latest release in that major line.
   (`wait_for_runner … outcome:flap`) so the failure mode is debuggable. Docs
   now stress scheduling the `cleanup` reaper for warm pools, since it is the
   backstop that reaps a leaked *running* instance whose runner never came up.
+
+## [4.0.1] - 2026-07-08
+
+### Fixed
+
+- **Warm restart corrupted user data** (#66): `ModifyInstanceAttribute` was
+  handed an already-base64-encoded string and encoded it a second time, so a
+  restarted warm instance booted with unusable user data. The raw bytes are now
+  passed through.
 
 ## [4.0.0] - 2026-07-02
 
