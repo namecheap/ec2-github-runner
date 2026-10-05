@@ -432,7 +432,7 @@ function buildReusableUserData({ runnerVersion, owner, repo, label, githubRegist
     'cd /home/runner/actions-runner',
     'rm -f .runner .credentials .credentials_rsaparams',
     'gh_runner_phone_home configuring',
-    'sudo -u runner -H env DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 ./config.sh --url "$GH_REPO_URL" --token "$GH_TOKEN" --labels "$GH_LABEL" --ephemeral --unattended --disableupdate',
+    'sudo -u runner -H env DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 ./config.sh --url "$GH_REPO_URL" --token "$GH_TOKEN" --labels "$GH_LABEL" --no-default-labels --ephemeral --unattended --disableupdate',
     'GH_RUNNER_STEP=registered',
     'gh_runner_phone_home registered',
     'sudo -u runner -H ./run.sh',
@@ -538,6 +538,14 @@ function buildReusableUserData({ runnerVersion, owner, repo, label, githubRegist
 // - Dedicated 'runner' user via useradd + sudo -u. The old
 //   RUNNER_ALLOW_RUNASROOT=1 escape hatch is gone. Runner has its own
 //   home under /home/runner/ and writes config.sh state there.
+//
+// - --no-default-labels on config.sh: the runner carries ONLY the unique
+//   per-run label, never the implicit self-hosted/Linux/X64 set. Without
+//   it, any job in the repo (including a fork PR's own job, once approved
+//   or from a returning contributor) could target `runs-on: [self-hosted,
+//   linux, x64]`, queue for up to 24h, and grab the runner the next time a
+//   trusted run starts one -- along with its instance role, subnet, EIP and
+//   the registration token in IMDS user-data. Requires runner >= 2.299.0.
 //
 // - --ephemeral --unattended --disableupdate on config.sh: one-job
 //   runner, no interactive prompts, no runtime self-update during the
@@ -668,7 +676,7 @@ function buildUserData({ runnerVersion, owner, repo, label, githubRegistrationTo
     'export DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1',
     'GH_RUNNER_STEP=configuring',
     'gh_runner_phone_home configuring',
-    `./config.sh --url "https://github.com/${owner}/${repo}" --token "${githubRegistrationToken}" --labels "${label}" --ephemeral --unattended --disableupdate`,
+    `./config.sh --url "https://github.com/${owner}/${repo}" --token "${githubRegistrationToken}" --labels "${label}" --no-default-labels --ephemeral --unattended --disableupdate`,
     'GH_RUNNER_STEP=registered',
     'gh_runner_phone_home registered',
     './run.sh',

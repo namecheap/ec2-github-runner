@@ -136,7 +136,7 @@ describe('phone-home failure-detail capture (real bash execution)', () => {
       '\nGH_REGISTER_SCRIPT',
     ).replace(/^#!\/bin\/bash\n/, '');
 
-    const marker = 'sudo -u runner -H env DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 ./config.sh --url "$GH_REPO_URL" --token "$GH_TOKEN" --labels "$GH_LABEL" --ephemeral --unattended --disableupdate';
+    const marker = 'sudo -u runner -H env DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 ./config.sh --url "$GH_REPO_URL" --token "$GH_TOKEN" --labels "$GH_LABEL" --no-default-labels --ephemeral --unattended --disableupdate';
     const value = runAndCapturePhoneHome(registerScriptBody, {
       marker,
       fakeCommand: LONG_MULTILINE_FAKE_CMD.call,
@@ -186,7 +186,7 @@ describe('phone-home failure-detail capture (real bash execution)', () => {
     const ud = buildUserData({ ...args, reuse: 'terminate' });
     const heredocBody = extractBetween(ud, "sudo -u runner -H bash <<'RUNNER_BOOTSTRAP'\n", '\nRUNNER_BOOTSTRAP');
 
-    const marker = './config.sh --url "https://github.com/o/r" --token "TOK" --labels "l" --ephemeral --unattended --disableupdate';
+    const marker = './config.sh --url "https://github.com/o/r" --token "TOK" --labels "l" --no-default-labels --ephemeral --unattended --disableupdate';
     const value = runAndCapturePhoneHome(heredocBody, {
       marker,
       fakeCommand: LONG_MULTILINE_FAKE_CMD.call,

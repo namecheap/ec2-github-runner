@@ -97,6 +97,21 @@ describe('buildUserData', () => {
     expect(ud).toContain('--ephemeral --unattended --disableupdate');
   });
 
+  // Without --no-default-labels the runner also gets self-hosted/Linux/X64,
+  // which lets any job in the repo (e.g. a fork PR's own job) target
+  // `runs-on: [self-hosted, linux, x64]` and take the runner from the
+  // trusted run that started it.
+  test('registers with --no-default-labels so only the unique label matches (cold launch)', () => {
+    const line = buildUserData(args).split('\n').find(l => l.includes('./config.sh '));
+    expect(line).toContain('--labels "runner-abc12" --no-default-labels');
+  });
+
+  test('registers with --no-default-labels on every warm-pool boot (reuse: stop)', () => {
+    const lines = buildUserData({ ...args, reuse: 'stop' }).split('\n').filter(l => l.includes('./config.sh '));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('--labels "$GH_LABEL" --no-default-labels');
+  });
+
   test('arms a TTL self-destruct shutdown when max-lifetime-minutes > 0', () => {
     const ud = buildUserData({ ...args, maxLifetimeMinutes: '360' });
     expect(ud).toContain('shutdown -h +360 || true');

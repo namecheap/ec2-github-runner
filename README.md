@@ -720,6 +720,8 @@ Please find more details about this security note on [GitHub documentation](http
 
 > ⚠️ **`reuse: stop` (warm pools) makes this worse.** With reuse, a runner's disk carries over between jobs, so a later job can read a previous job's residue (checked-out code, caches, credentials written to disk). Only use `reuse: stop` for a **single trusted repository's** CI. Never combine it with public-repo / untrusted-PR workloads. The default `reuse: terminate` gives every job a fresh instance.
 
+**Runners carry only their unique label.** The action registers every runner with `--no-default-labels`, so it never gets the implicit `self-hosted` / `Linux` / `X64` labels. A job can only be scheduled onto it via the exact per-run `label` output, never via `runs-on: [self-hosted, linux, x64]`. Without this, any job in the repository — including a fork PR's own job once its workflow is approved — could queue for up to 24 hours and take the next runner a trusted run starts, along with its instance role, VPC access and the registration token in IMDS user-data. Keep `runs-on: ${{ needs.start-runner.outputs.label }}` in your workflows; a generic `self-hosted` target will no longer match. Still restrict fork workflow approval to all outside collaborators on public repos (**Settings → Actions → Fork pull request workflows from outside collaborators**): a unique label is defence in depth, not a substitute.
+
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for release notes and breaking changes. Pin the moving major tag (`@v4`) for the latest release in that line, or a specific version (`@v4.0.0`) to pin exactly.
