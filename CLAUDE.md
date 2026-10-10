@@ -24,7 +24,7 @@ When reviewing or editing `userData` in `src/aws.js`:
 npm run package
 ```
 
-CI's `verify-dist` job will fail the PR if `dist/` drifts from a clean build.
+CI's `verify-dist` job will fail the PR if `dist/` drifts from a clean build. The one exception is a Dependabot PR that changes only `package.json`/`package-lock.json`: drift there is a warning, because Dependabot cannot rebuild `dist/` and `package.yml` rebuilds and commits it on `main` after merge.
 
 ## Tests
 
