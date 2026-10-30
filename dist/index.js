@@ -106520,7 +106520,7 @@ class Config {
       reuseMaxCycles: core.getInput('reuse-max-cycles') || '20',
       reaperStoppedMaxAge: core.getInput('reaper-stopped-max-age') || '1440',
       iamRoleName: core.getInput('iam-role-name'),
-      runnerVersion: core.getInput('runner-version') || '2.338.0',
+      runnerVersion: core.getInput('runner-version') || '2.338.1',
       architecture: core.getInput('architecture') || 'x64',
       httpTokens: core.getInput('http-tokens') || 'required',
       encryptEbs: core.getInput('encrypt-ebs') || 'false',
@@ -106998,12 +106998,15 @@ module.exports = {
 // this table and upstream is caught at code-review time, not at runtime.
 //
 // Sources:
+//   https://github.com/actions/runner/releases/tag/v2.338.1
 //   https://github.com/actions/runner/releases/tag/v2.338.0
 //   https://github.com/actions/runner/releases/tag/v2.337.0
 //   https://github.com/actions/runner/releases/tag/v2.336.0
 //   https://github.com/actions/runner/releases/tag/v2.335.1
 
 const CHECKSUMS = {
+  'x64-2.338.1':   '08e9ccb3604d2462c24b5e33604dc30810296ca15cc65f23cffd4317eb144c37',
+  'arm64-2.338.1': '475e0c149fd3b611610127b9664ba5bacf5c6928795cc448ab520bb5f324bede',
   'x64-2.338.0':   'af4b794c1bc41d73d40535e3fe092a39f9679cd8d965954c2aca25a05ca41d32',
   'arm64-2.338.0': '628b4a7258487b80c1d3c221095a7ded349f5ae0175fd3dfab708d07428f041b',
   'x64-2.337.0':   '70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613',
