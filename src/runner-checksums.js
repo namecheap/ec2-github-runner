@@ -21,6 +21,7 @@
 // this table and upstream is caught at code-review time, not at runtime.
 //
 // Sources:
+//   https://github.com/actions/runner/releases/tag/v2.338.2
 //   https://github.com/actions/runner/releases/tag/v2.338.1
 //   https://github.com/actions/runner/releases/tag/v2.338.0
 //   https://github.com/actions/runner/releases/tag/v2.337.0
@@ -28,6 +29,8 @@
 //   https://github.com/actions/runner/releases/tag/v2.335.1
 
 const CHECKSUMS = {
+  'x64-2.338.2':   'baebf204307bac6193480852732f0aba2ae97b6c5597c244f4d5558390147c40',
+  'arm64-2.338.2': '670adb2f268fe21dcbb58b3db0e0aa9d5b3bddfe2c651481336e561ff86de945',
   'x64-2.338.1':   '08e9ccb3604d2462c24b5e33604dc30810296ca15cc65f23cffd4317eb144c37',
   'arm64-2.338.1': '475e0c149fd3b611610127b9664ba5bacf5c6928795cc448ab520bb5f324bede',
   'x64-2.338.0':   'af4b794c1bc41d73d40535e3fe092a39f9679cd8d965954c2aca25a05ca41d32',
