@@ -6,6 +6,51 @@ always points at the latest release in that major line.
 
 ## [Unreleased]
 
+## [4.1.0] - 2026-11-20
+
+A security hardening of runner registration, a newer bundled runner, and every
+open Dependabot alert closed. Minor rather than patch because of the label
+change below: check it if any workflow targets these runners by a generic
+label.
+
+### Changed
+
+- **Runners register with `--no-default-labels`** (#83). GitHub no longer
+  attaches `self-hosted`, `Linux` and `X64` to the runners this action starts;
+  they carry only the unique label from the `label` output. This closes a hole
+  where any other job in the repository (for example one added by a fork pull
+  request on a public repo) could ask for `runs-on: [self-hosted, linux, x64]`,
+  take the runner, and reach the instance role credentials, network access and
+  the registration token in user data. Applies to both cold launches and
+  warm-pool (`reuse: stop`) restarts.
+
+  **Action needed only if** a workflow uses `runs-on: self-hosted` (or `linux`,
+  `x64`) to reach these runners. Switch it to
+  `runs-on: ${{ needs.start-runner.outputs.label }}`, as the README documents.
+  Requires `actions/runner` >= 2.299.0; the bundled default meets this.
+
+### Fixed
+
+- **Default `actions/runner` bumped to 2.338.2** (#84, #85, #87, via
+  `bump-runner`). A launch that does not pin `runner-version` gets the newer
+  agent and its pinned-checksum verification.
+
+### Security
+
+- **Dependabot alert #28 resolved** (#89): transitive dev dependency
+  `minimatch` overridden to `^11.0.1` (GHSA-g3hv-75wg-m249), now 11.0.9.
+  Outside the bundle.
+- `undici` 6.28.0 -> 6.29.1 (#80, #86), `brace-expansion` 5.0.9 -> 5.0.12
+  (#81), and `@aws-sdk/xml-builder` 3.972.30 -> 3.972.43, which drops
+  `fast-xml-parser` (#88).
+
+### Internal
+
+- **`verify-dist` warns instead of failing** on `dist/` drift in Dependabot
+  pull requests that change only `package.json` / `package-lock.json` (#82).
+  `package.yml` rebuilds and commits `dist/` on `main` after merge; any other
+  drift still fails the check.
+
 ## [4.0.3] - 2026-09-18
 
 Housekeeping: a newer bundled runner, and every open Dependabot and
